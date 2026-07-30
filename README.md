@@ -6,7 +6,7 @@ Runnable code from Sourcegraph videos and blog posts. One directory per recipe, 
 
 | Recipe | What it shows | Video |
 | --- | --- | --- |
-| [search-jobs-api](search-jobs-api/) | Run an exhaustive Search Job over the Sourcegraph API and download the results as JSONL | [Watch](VIDEO_URL) |
+| [search-jobs-api](search-jobs-api/) | Run an exhaustive Search Job over the Sourcegraph API and download the results as JSONL | [Watch](https://www.youtube.com/watch?v=Dh-7dZuS89M) |
 
 ## Adding a recipe
 

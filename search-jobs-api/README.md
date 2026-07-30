@@ -2,7 +2,7 @@
 
 Create a Sourcegraph Search Job over the API, poll it to completion, and download the results as JSONL. Runs under bare `node` with no dependencies.
 
-Video: [VIDEO_URL](VIDEO_URL)
+Video: [Sourcegraph Search Jobs API](https://www.youtube.com/watch?v=Dh-7dZuS89M)
 
 ## What it does
 
