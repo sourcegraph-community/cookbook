@@ -29,7 +29,12 @@ var (
 )
 
 // stateGlyph returns a marker and the style to draw it in.
-func stateGlyph(state string) (string, lipgloss.Style) {
+//
+// A processing job takes spin, the current spinner frame, so its marker moves.
+// Every frame has to be one cell wide or the columns to its right shift; see the
+// spinner choice in newModel. An empty spin falls back to a static marker, which
+// is what the layout tests use.
+func stateGlyph(state, spin string) (string, lipgloss.Style) {
 	switch state {
 	case StateCompleted:
 		return "✔", styleGreen
@@ -38,8 +43,13 @@ func stateGlyph(state string) (string, lipgloss.Style) {
 	case StateCanceled:
 		return "⊘", styleYellow
 	case StateProcessing:
+		if spin != "" {
+			return spin, styleCyan
+		}
 		return "●", styleCyan
 	case StateQueued:
+		// Deliberately static. A queued job is not doing anything yet, and that
+		// reads at a glance only if it is the one marker holding still.
 		return "◌", styleDim
 	default:
 		return "·", styleDim
@@ -48,7 +58,10 @@ func stateGlyph(state string) (string, lipgloss.Style) {
 
 // --- list delegate ----------------------------------------------------------
 
-type jobDelegate struct{}
+type jobDelegate struct {
+	// The current spinner frame, replaced on every tick by the update loop.
+	spin string
+}
 
 func (jobDelegate) Height() int                         { return 1 }
 func (jobDelegate) Spacing() int                        { return 0 }
@@ -68,7 +81,7 @@ func (d jobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 		state, query = e.job.State, e.job.Query
 	}
 
-	glyph, glyphStyle := stateGlyph(state)
+	glyph, glyphStyle := stateGlyph(state, d.spin)
 
 	// Right-hand columns are fixed width so they line up; the query takes
 	// whatever is left.
@@ -231,11 +244,10 @@ func (m model) renderDetail() string {
 	case e.job.LogsURL != "":
 		second = styleDim.Render(truncate("logs: "+e.job.LogsURL, m.width))
 	case !IsTerminal(e.job.State):
-		// The one place a moving indicator earns its keep: a job that is still
-		// running looks identical to a stalled one without it.
-		// spinner.View() already ends in a space.
+		// MiniDot frames carry no trailing space, unlike Dot, so the gap is
+		// spelled out here.
 		second = styleCyan.Render(m.spinner.View()) +
-			styleDim.Render(fmt.Sprintf("%s · %s", PrettyState(e.job.State), fmtDuration(e.elapsed())))
+			styleDim.Render(fmt.Sprintf(" %s · %s", PrettyState(e.job.State), fmtDuration(e.elapsed())))
 	default:
 		second = styleDim.Render(PrettyState(e.job.State))
 	}

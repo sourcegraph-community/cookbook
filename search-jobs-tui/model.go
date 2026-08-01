@@ -191,7 +191,10 @@ func newModel(c *Client, outDir, storePath string, pollEvery time.Duration, init
 	l.SetFilteringEnabled(false)
 
 	sp := spinner.New()
-	sp.Spinner = spinner.Dot
+	// One cell wide, unlike Dot, which pads a trailing space. The same frame
+	// draws the running job's marker in the list, where anything wider than one
+	// cell would shift every column to its right.
+	sp.Spinner = spinner.MiniDot
 
 	m := model{
 		client:    c,
@@ -534,6 +537,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
+		// A list delegate cannot reach the model, so the frame is pushed into it
+		// on every tick. Without this the running job's marker sits still and a
+		// stalled job looks exactly like a working one.
+		m.list.SetDelegate(jobDelegate{spin: m.spinner.View()})
 
 	default:
 		// The text input's cursor blink and its clipboard reply are unexported

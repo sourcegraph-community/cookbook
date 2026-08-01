@@ -93,7 +93,9 @@ The same three calls as the [search-jobs-api](../search-jobs-api/) recipe, plus 
 
 The last two are best-effort. An instance that does not implement them returns an error that `Unsupported` in `api.go` recognizes, and the dashboard quietly does without: it falls back to a local cache of job names for the list, and it hides the cancel action. Check your instance's own reference at `$SRC_ENDPOINT/api-reference` for what it actually supports.
 
-Three things needed more than the framework gives you.
+Four things needed more than the framework gives you.
+
+**Animating a list row.** A `list.ItemDelegate` renders rows without access to the model, so it cannot read the spinner. The update loop pushes the current frame into the delegate with `SetDelegate` on every tick. `MiniDot` is the spinner because its frames are one cell wide: the marker sits in a fixed-width column, so a wider frame would shift every column to its right, and only while a job is running. A test walks every frame and checks the row width holds.
 
 **Pasting a query.** A terminal sends a paste as one bracketed-paste event, not as a run of key presses, so a model that switches only on `tea.KeyPressMsg` drops it silently. `tea.PasteMsg` gets its own case, and a paste arriving while the list has focus opens the query box first. `ctrl+v` takes one more step: the input answers that key press with a command that reads the OS clipboard, and the reply is an unexported message type, so the update loop forwards anything it does not recognize to the input while the box is open instead of matching it by name.
 

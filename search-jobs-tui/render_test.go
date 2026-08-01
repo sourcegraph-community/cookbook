@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -75,6 +76,35 @@ func TestJobRowsAlignRegardlessOfSelection(t *testing.T) {
 		for i, w := range widths {
 			if w != widths[0] {
 				t.Errorf("selection=%d: row %d is %d cells, row 0 is %d", sel, i, w, widths[0])
+			}
+		}
+	}
+}
+
+// The running job's marker is a spinner frame. A frame wider than one cell
+// shifts every column to its right, and it would do so only while a job is
+// running, which is the hardest case to notice by eye.
+func TestSpinnerFrameKeepsRowWidth(t *testing.T) {
+	jobs := []*SearchJob{
+		{Name: "users/a/searchJobs/1", Query: "context:global TODO count:all", State: StateProcessing},
+		{Name: "users/a/searchJobs/2", Query: "panic( lang:go", State: StateCompleted},
+	}
+	m := testModel(80, 24, jobs...)
+	var want int
+	for _, frame := range spinner.MiniDot.Frames {
+		m.list.SetDelegate(jobDelegate{spin: frame})
+		for i, line := range strings.Split(m.list.View(), "\n") {
+			plain := stripANSI(line)
+			if strings.TrimSpace(plain) == "" {
+				continue
+			}
+			got := len([]rune(plain))
+			if want == 0 {
+				want = got
+				continue
+			}
+			if got != want {
+				t.Errorf("frame %q: row %d is %d cells, want %d", frame, i, got, want)
 			}
 		}
 	}
