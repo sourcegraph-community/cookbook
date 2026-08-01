@@ -135,7 +135,7 @@ func TestColumnLabelsLineUpWithRows(t *testing.T) {
 		}
 		// "finished" is right-aligned in its cell, as the timestamps under it are.
 		if got, want := strings.Index(header, "finished")+len("finished"),
-			len([]rune(header))-c.count; got != want {
+			len([]rune(header)); got != want {
 			t.Errorf("w=%d: finished label ends at %d, its cell ends at %d", w, got, want)
 		}
 	}
@@ -149,10 +149,200 @@ func TestShortHelpFitsAnEightyColumnTerminal(t *testing.T) {
 	if n := len([]rune(bar)); n > 80 {
 		t.Errorf("short help is %d cells: %q", n, bar)
 	}
-	for _, want := range []string{"logs", "quit"} {
+	for _, want := range []string{"rerun", "logs", "delete", "quit"} {
 		if !strings.Contains(bar, want) {
 			t.Errorf("short help does not mention %q: %q", want, bar)
 		}
+	}
+}
+
+// The full help pane replaces a one-line footer, so its height is what decides
+// whether the frame still fits. Four rows is the budget; a fifth column is free.
+func TestFullHelpStaysFourRows(t *testing.T) {
+	m := testModel(80, 24)
+	pane := stripANSI(m.help.FullHelpView(m.keys.FullHelp()))
+	if rows := strings.Count(pane, "\n") + 1; rows > 4 {
+		t.Errorf("full help is %d rows:\n%s", rows, pane)
+	}
+	for i, line := range strings.Split(pane, "\n") {
+		if n := len([]rune(line)); n > 80 {
+			t.Errorf("full help line %d is %d cells: %q", i, n, line)
+		}
+	}
+	// Every key the list acts on has to appear here, since this is the only place
+	// the ones missing from the one-line bar are documented.
+	for _, want := range []string{"delete this job", "open in browser", "rerun this query"} {
+		if !strings.Contains(pane, want) {
+			t.Errorf("full help does not mention %q:\n%s", want, pane)
+		}
+	}
+}
+
+// x never deletes on its own. It opens a prompt, and only y answers it; every
+// other key backs out, including q, which must not quit out from under an
+// unanswered question.
+func TestDeleteAsksFirst(t *testing.T) {
+	jobs := []*SearchJob{
+		{Name: "users/a/searchJobs/145", Query: "context:global TODO count:all", State: StateCompleted},
+		{Name: "users/a/searchJobs/146", Query: "panic( lang:go", State: StateProcessing},
+	}
+	x := tea.KeyPressMsg{Code: 'x', Text: "x"}
+
+	for _, deny := range []tea.KeyPressMsg{
+		{Code: 'n', Text: "n"},
+		{Code: tea.KeyEscape},
+		{Code: 'q', Text: "q"},
+	} {
+		m := testModel(80, 24, jobs...)
+		next, cmd := m.handleKey(x)
+		m = next.(model)
+		if m.mode != modeConfirm {
+			t.Fatalf("x left mode = %v, want modeConfirm", m.mode)
+		}
+		if cmd != nil {
+			t.Error("x issued a command before the prompt was answered")
+		}
+		if m.confirm != "users/a/searchJobs/145" {
+			t.Errorf("confirm = %q, want the selected job", m.confirm)
+		}
+		frame := stripANSI(m.render())
+		for _, want := range []string{"delete job 145", "cannot be undone", "y delete it"} {
+			if !strings.Contains(frame, want) {
+				t.Errorf("prompt frame does not contain %q", want)
+			}
+		}
+
+		next, cmd = m.handleKey(deny)
+		m = next.(model)
+		if m.mode != modeList {
+			t.Errorf("%v left mode = %v, want modeList", deny, m.mode)
+		}
+		if cmd != nil {
+			t.Errorf("%v issued a command; nothing should happen on a denied delete", deny)
+		}
+		if len(m.jobs) != 2 {
+			t.Errorf("%v: %d jobs left, want 2", deny, len(m.jobs))
+		}
+	}
+
+	// y is the only key that sends the request.
+	m := testModel(80, 24, jobs...)
+	next, _ := m.handleKey(x)
+	m = next.(model)
+	next, cmd := m.handleKey(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m = next.(model)
+	if cmd == nil {
+		t.Error("y issued no delete command")
+	}
+	if m.mode != modeList || m.confirm != "" {
+		t.Errorf("y left mode = %v confirm = %q, want modeList and no pending job", m.mode, m.confirm)
+	}
+	// The row stays until the server says it is gone.
+	if len(m.jobs) != 2 {
+		t.Errorf("%d jobs after y, want 2 until the reply arrives", len(m.jobs))
+	}
+	if !strings.Contains(m.status, "deleting 145") {
+		t.Errorf("status = %q, want it to say the delete is in flight", m.status)
+	}
+
+	// A running job is worth flagging: the prompt is the last chance to notice.
+	m = testModel(80, 24, jobs...)
+	m.list.Select(1)
+	next, _ = m.handleKey(x)
+	m = next.(model)
+	if frame := stripANSI(m.render()); !strings.Contains(frame, "still processing") {
+		t.Error("prompt for an unfinished job does not say it is still running")
+	}
+}
+
+// The prompt takes the status row instead of a pane of its own, so asking must
+// not move anything else.
+func TestConfirmPromptKeepsTheFrameSize(t *testing.T) {
+	for _, tc := range []struct{ w, h int }{{80, 24}, {40, 12}, {200, 60}} {
+		m := testModel(tc.w, tc.h, &SearchJob{
+			Name:  "users/a/searchJobs/145",
+			Query: "context:global patterntype:keyword TODO OR FIXME count:all lang:go",
+			State: StateCompleted,
+		})
+		next, _ := m.handleKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+		m = next.(model)
+
+		out := m.render()
+		if got := strings.Count(out, "\n") + 1; got != tc.h {
+			t.Errorf("w=%d h=%d: prompt frame is %d lines, want %d", tc.w, tc.h, got, tc.h)
+		}
+		for i, line := range strings.Split(out, "\n") {
+			if n := len([]rune(stripANSI(line))); n > tc.w {
+				t.Errorf("w=%d: prompt frame line %d is %d cells: %q", tc.w, i, n, stripANSI(line))
+			}
+		}
+	}
+}
+
+// What the server's reply does to the row. A 404 means two different things
+// here, and the code tells them apart: the job is gone, or the method is.
+func TestDeleteReplyHandling(t *testing.T) {
+	cases := []struct {
+		name          string
+		err           error
+		wantJobs      int
+		wantCanDelete bool
+		wantStatus    string
+	}{
+		{"deleted", nil, 1, true, "deleted 145"},
+		{"already gone", &APIError{Status: 404, Code: "not_found"}, 1, true, "already gone"},
+		{"method missing", &APIError{Status: 404, Code: "unimplemented"}, 2, false, "does not support"},
+		{"server error", &APIError{Status: 500}, 2, true, "delete failed"},
+	}
+	for _, tc := range cases {
+		m := testModel(80, 24,
+			&SearchJob{Name: "users/a/searchJobs/145", Query: "x", State: StateCompleted},
+			&SearchJob{Name: "users/a/searchJobs/146", Query: "y", State: StateCompleted},
+		)
+		next, _ := m.Update(deleteDoneMsg{name: "users/a/searchJobs/145", err: tc.err})
+		m = next.(model)
+
+		if len(m.jobs) != tc.wantJobs {
+			t.Errorf("%s: %d jobs left, want %d", tc.name, len(m.jobs), tc.wantJobs)
+		}
+		if len(m.list.Items()) != tc.wantJobs {
+			t.Errorf("%s: list shows %d rows, want %d", tc.name, len(m.list.Items()), tc.wantJobs)
+		}
+		if m.canDelete != tc.wantCanDelete {
+			t.Errorf("%s: canDelete = %v, want %v", tc.name, m.canDelete, tc.wantCanDelete)
+		}
+		if !strings.Contains(m.status, tc.wantStatus) {
+			t.Errorf("%s: status = %q, want it to contain %q", tc.name, m.status, tc.wantStatus)
+		}
+	}
+
+	// An instance that answered "unimplemented" once is not asked again.
+	m := testModel(80, 24, &SearchJob{Name: "users/a/searchJobs/145", Query: "x", State: StateCompleted})
+	m.canDelete = false
+	next, cmd := m.handleKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m = next.(model)
+	if m.mode != modeList || cmd != nil {
+		t.Error("x prompted on an instance that cannot delete")
+	}
+	if !strings.Contains(m.status, "does not support") {
+		t.Errorf("status = %q, want it to say deleting is unsupported", m.status)
+	}
+}
+
+// A job with a transfer running is still deletable, and the transfer has to stop
+// with it: nothing else would ever close that goroutine's file.
+func TestDeleteStopsAnInFlightDownload(t *testing.T) {
+	m := testModel(80, 24, &SearchJob{Name: "users/a/searchJobs/145", Query: "x", State: StateCompleted})
+	canceled := false
+	m.jobs[0].dl = &download{kind: transferResults, cancel: func() { canceled = true }, total: -1}
+
+	next, _ := m.Update(deleteDoneMsg{name: "users/a/searchJobs/145"})
+	m = next.(model)
+	if !canceled {
+		t.Error("deleting a job left its download running")
+	}
+	if len(m.jobs) != 0 {
+		t.Errorf("%d jobs left, want 0", len(m.jobs))
 	}
 }
 
@@ -272,6 +462,40 @@ func TestPasteFillsTheQueryInput(t *testing.T) {
 	m = next.(model)
 	if got, want := m.input.Value(), "context:global TODO count:all lang:go"; got != want {
 		t.Errorf("input after second paste = %q, want %q", got, want)
+	}
+}
+
+// r resubmits the selected job's query without touching the original job. The
+// created job comes back from the server, so this checks the key is wired to a
+// command and that a row with no query to resubmit says so instead.
+func TestRerunSubmitsTheSelectedQuery(t *testing.T) {
+	m := testModel(80, 24,
+		&SearchJob{Name: "users/a/searchJobs/1", Query: "context:global TODO count:all", State: StateCompleted},
+		&SearchJob{Name: "users/a/searchJobs/2", State: StateUnspecified},
+	)
+	r := tea.KeyPressMsg{Code: 'r', Text: "r"}
+
+	next, cmd := m.handleKey(r)
+	m = next.(model)
+	if cmd == nil {
+		t.Error("r on a job with a query issued no command")
+	}
+	if !strings.Contains(m.status, "context:global TODO count:all") {
+		t.Errorf("status = %q, want the query in it", m.status)
+	}
+	if n := len(m.jobs); n != 2 {
+		t.Errorf("rerun changed the list to %d jobs; the original should be untouched", n)
+	}
+
+	// Row two is a name recovered from the cache with no query behind it.
+	m.list.Select(1)
+	next, cmd = m.handleKey(r)
+	m = next.(model)
+	if cmd != nil {
+		t.Error("r on a job with no query issued a command")
+	}
+	if got, want := m.status, "nothing to rerun"; got != want {
+		t.Errorf("status = %q, want %q", got, want)
 	}
 }
 

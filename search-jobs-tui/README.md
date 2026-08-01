@@ -43,7 +43,7 @@ export SRC_ACCESS_TOKEN="sgp_..."
 go run .
 ```
 
-Press `n`, type a query, press enter. Repeat for as many queries as you want to run. Press `d` on a completed job to download its results, or `l` for its log.
+Press `n`, type a query, press enter. Repeat for as many queries as you want to run. Press `d` on a completed job to download its results, or `l` for its log. Press `x` to delete a job you are done with, and `y` to confirm.
 
 Start with a query already running:
 
@@ -66,9 +66,11 @@ go build -o search-jobs-tui .
 | `cmd-v` `ctrl-v` | Paste a query. Works from the list too, which opens the query box |
 | `enter` | Submit the query |
 | `esc` | Leave the query box |
+| `r` | Rerun the selected job's query as a new job, as the web UI's rerun does |
 | `d` | Download the selected completed job's results |
 | `l` | Download the selected job's log |
 | `c` | Cancel the selected running job, or an in-flight download |
+| `x` | Delete the selected job, after a `y`/`n` confirmation |
 | `o` | Open the Search Jobs page in a browser |
 | `?` | Full key list |
 | `q` `ctrl-c` | Quit |
@@ -84,7 +86,7 @@ go build -o search-jobs-tui .
 
 ## How it works
 
-The same three calls as the [search-jobs-api](../search-jobs-api/) recipe, plus two more. Every request carries the header `Authorization: token <token>`.
+The same three calls as the [search-jobs-api](../search-jobs-api/) recipe, plus three more. Every request carries the header `Authorization: token <token>`.
 
 1. `POST /api/searchjobs.v1.Service/CreateSearchJob` with body `{"parent": "users/-", "searchJob": {"query": "..."}}`. The `users/-` parent means the authenticated user. Needs `externalapi:write`.
 2. `POST /api/searchjobs.v1.Service/GetSearchJob` with body `{"name": "..."}`. Needs `externalapi:read`.
@@ -92,12 +94,15 @@ The same three calls as the [search-jobs-api](../search-jobs-api/) recipe, plus 
 4. `GET` the job's `logsUrl`, which streams the log as CSV.
 5. `POST /api/searchjobs.v1.Service/ListSearchJobs` populates the dashboard at startup.
 6. `POST /api/searchjobs.v1.Service/CancelSearchJob` stops a running job.
+7. `POST /api/searchjobs.v1.Service/DeleteSearchJob` removes a job and its stored results. Needs `externalapi:write`.
 
-The last two are best-effort. An instance that does not implement them returns an error that `Unsupported` in `api.go` recognizes, and the dashboard quietly does without: it falls back to a local cache of job names for the list, and it hides the cancel action. Check your instance's own reference at `$SRC_ENDPOINT/api-reference` for what it actually supports.
+The last three are best-effort. An instance that does not implement them returns an error that `Unsupported` in `api.go` recognizes, and the dashboard quietly does without: it falls back to a local cache of job names for the list, and it hides the cancel and delete actions. Check your instance's own reference at `$SRC_ENDPOINT/api-reference` for what it actually supports.
+
+Cancel and delete are not the same thing. Cancel stops the work and leaves the record, so a canceled job still sits in the list with whatever results it had reached. Delete takes the record and the stored results away and cannot be undone, which is why `x` asks before sending anything. Files already written to `--out-dir` are local copies and are left alone.
 
 The log is a CSV, one row per repository and revision the job touched, with a status and a failure message for each. It is the only explanation a rejected query ever gets, and it is worth reading on a job that succeeded too: that is where partial coverage shows up. `l` fetches it for any job that has started. An instance that sends no `logsUrl` falls back to `/.api/search/export/<id>.log`, which is what the web UI's own "View logs" button requests, built from the numeric id already in the job record. That path is the internal API, so a token needs the broader `user:all` scope to use it; `logsUrl` needs only `externalapi:read`, which is why it is preferred.
 
-Four things needed more than the framework gives you.
+Five things needed more than the framework gives you.
 
 **Animating a list row.** A `list.ItemDelegate` renders rows without access to the model, so it cannot read the spinner. The update loop pushes the current frame into the delegate with `SetDelegate` on every tick. `MiniDot` is the spinner because its frames are one cell wide: the marker sits in a fixed-width column, so a wider frame would shift every column to its right, and only while a job is running. A test walks every frame and checks the row width holds.
 
@@ -106,6 +111,10 @@ Four things needed more than the framework gives you.
 **Polling many jobs.** A one-second tick drives elapsed timers. Every `--poll` interval that tick also fans out one command per unfinished job. Each command is independent, so one slow request cannot stall the rest, and a failed poll writes to the status line instead of ending the program. Jobs in `STATE_COMPLETED`, `STATE_FAILED`, or `STATE_CANCELED` drop out of the poll set.
 
 **Streaming download progress.** A `tea.Cmd` returns exactly one message, so it cannot report progress as it goes. The download runs in a goroutine that writes samples onto a buffered channel; a command reads one value from that channel and turns it into a message; the update loop re-issues that command after every read. Progress sends are non-blocking and drop when the buffer is full, because a fresher byte count is always right behind. The final message is a blocking send, so completion is never dropped.
+
+**Confirming a destructive key.** Bubbles ships no confirm component. [huh](https://github.com/charmbracelet/huh) has one, but embedding a form and its theme into a dashboard that already owns its layout is more machinery than a yes/no needs, so the prompt is a fourth mode instead: `x` records the job name and switches to `modeConfirm`, which takes the next key press. Only `y` sends the request; every other key backs out, `q` included, so quit cannot fire out from under an unanswered question, and `enter` is deliberately not wired up because enter is submit everywhere else. The prompt takes the status row and the footer, both of which already exist, so asking does not change the height of the frame.
+
+The row stays until the server confirms the job is gone. Two of those replies are HTTP 404: ConnectRPC answers an unknown procedure with one, and a missing job gets one too, so the status alone would read "no such method" as "no such job". The `code` field separates them, which is what `NotFound` in `api.go` checks. Get that wrong and one job deleted from another window turns the delete key off for the rest of the session.
 
 Results stream straight to disk and are never held in memory, so a multi-gigabyte result set is fine. Canceling a download deletes the partial file rather than leaving something that looks like a complete result set.
 
@@ -117,7 +126,7 @@ The layout tests run without a token or a network connection:
 go test ./...
 ```
 
-They pin the things that break quietly: every frame fills the window exactly, no line exceeds the terminal width, and job rows stay aligned whether or not they are selected.
+They pin the things that break quietly: every frame fills the window exactly, no line exceeds the terminal width, job rows stay aligned whether or not they are selected, and `x` never deletes anything without an answer.
 
 ## Troubleshooting
 

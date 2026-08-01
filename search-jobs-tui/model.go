@@ -40,6 +40,7 @@ const (
 	modeList mode = iota
 	modeInput
 	modeHelp
+	modeConfirm
 )
 
 // transferKind distinguishes the two things a job has to download. They share
@@ -149,6 +150,10 @@ type cancelDoneMsg struct {
 	name string
 	err  error
 }
+type deleteDoneMsg struct {
+	name string
+	err  error
+}
 type dlProgressMsg struct {
 	name        string
 	done, total int64
@@ -168,13 +173,17 @@ type keyMap struct {
 	Down     key.Binding
 	New      key.Binding
 	Submit   key.Binding
+	Rerun    key.Binding
 	Download key.Binding
 	Logs     key.Binding
 	Cancel   key.Binding
+	Delete   key.Binding
 	Open     key.Binding
 	Help     key.Binding
 	Quit     key.Binding
 	Escape   key.Binding
+	Confirm  key.Binding
+	Deny     key.Binding
 }
 
 func defaultKeys() keyMap {
@@ -183,30 +192,52 @@ func defaultKeys() keyMap {
 		Down:     key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
 		New:      key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
 		Submit:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit")),
+		Rerun:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rerun")),
 		Download: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "download")),
-		// Labeled "logs" rather than "log download" because the one-line help bar
-		// has to fit an 80-column terminal, and anything past the edge is cut off
-		// the right-hand end, which is where q lives. The full list spells it out.
+		// Short labels here, spelled out in FullHelp: the one-line help bar has to
+		// fit an 80-column terminal, and anything past the edge is cut off the
+		// right-hand end, which is where q lives.
 		Logs:   key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "logs")),
 		Cancel: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "cancel")),
-		Open:   key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in browser")),
+		Delete: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")),
+		Open:   key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open")),
 		Help:   key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:   key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 		Escape: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		// Only y confirms a delete, and it is the only key that does: enter is not
+		// wired up, because enter is submit everywhere else in this dashboard and
+		// muscle memory should not be able to destroy a job. Every other key backs
+		// out, so the listed n is one way to say no rather than the way.
+		Confirm: key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "delete it")),
+		Deny:    key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n/esc", "keep it")),
 	}
 }
 
+// ShortHelp is the one-line footer. It leaves out o open in browser, which the
+// full list carries: the bar is cut off at its right-hand end, where q quit
+// sits, so on an 80-column terminal there is room for eight entries and no more.
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.New, k.Download, k.Logs, k.Cancel, k.Open, k.Help, k.Quit}
+	return []key.Binding{k.New, k.Rerun, k.Download, k.Logs, k.Cancel, k.Delete, k.Help, k.Quit}
 }
 
+// FullHelp is four columns, none taller than four rows, which is what keeps the
+// help pane the same height as the footer it replaces.
 func (k keyMap) FullHelp() [][]key.Binding {
+	rerun := key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rerun this query"))
 	logs := key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "log download"))
+	del := key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete this job"))
+	open := key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in browser"))
 	return [][]key.Binding{
 		{k.Up, k.Down, k.New, k.Submit},
-		{k.Download, logs, k.Cancel, k.Open},
+		{k.Download, logs, rerun},
+		{k.Cancel, del, open},
 		{k.Help, k.Escape, k.Quit},
 	}
+}
+
+// ConfirmHelp replaces the footer while a delete is waiting on an answer.
+func (k keyMap) ConfirmHelp() []key.Binding {
+	return []key.Binding{k.Confirm, k.Deny}
 }
 
 // --- model ------------------------------------------------------------------
@@ -227,11 +258,16 @@ type model struct {
 	help     help.Model
 	keys     keyMap
 
-	mode    mode
-	status  string
-	width   int
-	height  int
-	canStop bool // instance implements CancelSearchJob
+	mode   mode
+	status string
+	width  int
+	height int
+	// The job name a pending delete is waiting on, empty outside modeConfirm. A
+	// name rather than a *jobEntry: the answer arrives at least one message later,
+	// and looking the row up again then is what keeps a stale pointer impossible.
+	confirm   string
+	canStop   bool // instance implements CancelSearchJob
+	canDelete bool // instance implements DeleteSearchJob
 }
 
 func newModel(c *Client, outDir, storePath string, pollEvery time.Duration, initialQuery string) model {
@@ -267,12 +303,13 @@ func newModel(c *Client, outDir, storePath string, pollEvery time.Duration, init
 		list:      l,
 		input:     in,
 		// The percentage is rendered alongside the bar, not inside it.
-		progress: progress.New(progress.WithDefaultBlend(), progress.WithoutPercentage()),
-		spinner:  sp,
-		help:     h,
-		keys:     defaultKeys(),
-		mode:     modeList,
-		canStop:  true,
+		progress:  progress.New(progress.WithDefaultBlend(), progress.WithoutPercentage()),
+		spinner:   sp,
+		help:      h,
+		keys:      defaultKeys(),
+		mode:      modeList,
+		canStop:   true,
+		canDelete: true,
 	}
 
 	// Start at a conventional size so there is always a frame to draw. A real
@@ -349,6 +386,14 @@ func cancelJobCmd(c *Client, name string) tea.Cmd {
 	}
 }
 
+func deleteJobCmd(c *Client, name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return deleteDoneMsg{name: name, err: c.DeleteSearchJob(ctx, name)}
+	}
+}
+
 // waitForDownload turns the next value on a download's channel into a message.
 // Update re-issues it after each progress message, which is what keeps a
 // streaming transfer visible in a one-message-per-command world.
@@ -397,6 +442,25 @@ func (m *model) selected() *jobEntry {
 		return nil
 	}
 	return item.entry
+}
+
+// dropJob takes one row out of the dashboard once the server no longer has it.
+// The selection is left to the list, which clamps it, so removing the last row
+// does not leave the cursor past the end.
+func (m *model) dropJob(name string) tea.Cmd {
+	kept := make([]*jobEntry, 0, len(m.jobs))
+	for _, e := range m.jobs {
+		if e.job != nil && e.job.Name == name {
+			if e.dl != nil {
+				e.dl.cancel()
+			}
+			continue
+		}
+		kept = append(kept, e)
+	}
+	m.jobs = kept
+	m.persist()
+	return m.syncList()
 }
 
 func (m *model) syncList() tea.Cmd {
@@ -603,6 +667,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "canceled " + path.Base(msg.name)
 
+	case deleteDoneMsg:
+		switch {
+		case msg.err == nil:
+			m.status = "deleted " + path.Base(msg.name)
+			cmds = append(cmds, m.dropJob(msg.name))
+		case NotFound(msg.err):
+			// Someone else deleted it, or it was a name recovered from the local
+			// cache that the instance no longer has. Either way the row is wrong.
+			m.status = path.Base(msg.name) + " was already gone; removed it from the list"
+			cmds = append(cmds, m.dropJob(msg.name))
+		case Unsupported(msg.err):
+			m.canDelete = false
+			m.status = "this instance does not support deleting jobs"
+		default:
+			m.status = "delete failed: " + msg.err.Error()
+		}
+
 	case dlProgressMsg:
 		e := m.find(msg.name)
 		if e == nil || e.dl == nil {
@@ -704,6 +785,22 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case modeHelp:
 		m.mode = modeList
 		return m, nil
+
+	case modeConfirm:
+		// One question, two outcomes, and only y takes the destructive one. The
+		// prompt is dismissed either way, so a stray key never leaves the dashboard
+		// waiting on an answer nobody knows it wants.
+		name := m.confirm
+		m.mode, m.confirm = modeList, ""
+		if !key.Matches(msg, m.keys.Confirm) {
+			m.status = "kept " + path.Base(name)
+			return m, nil
+		}
+		if m.find(name) == nil {
+			return m, nil
+		}
+		m.status = "deleting " + path.Base(name) + "…"
+		return m, deleteJobCmd(m.client, name)
 	}
 
 	// modeList
@@ -724,6 +821,20 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeInput
 		m.input.Focus()
 		return m, textinput.Blink
+
+	case key.Matches(msg, m.keys.Rerun):
+		// Same as the web UI's rerun: submit the selected job's query again as a
+		// new job. The original is left alone, so a finished run and its rerun sit
+		// side by side in the list and stay comparable.
+		e := m.selected()
+		if e == nil || e.job == nil || e.job.Query == "" {
+			// A job recovered from the cache with no query is the one case where
+			// there is nothing to resubmit.
+			m.status = "nothing to rerun"
+			return m, nil
+		}
+		m.status = "rerunning " + truncate(e.job.Query, max(20, m.width-11)) + "…"
+		return m, createJobCmd(m.client, e.job.Query)
 
 	case key.Matches(msg, m.keys.Download):
 		e := m.selected()
@@ -769,6 +880,21 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, cancelJobCmd(m.client, e.job.Name)
+
+	case key.Matches(msg, m.keys.Delete):
+		e := m.selected()
+		if e == nil || e.job == nil || e.job.Name == "" {
+			return m, nil
+		}
+		if !m.canDelete {
+			m.status = "this instance does not support deleting jobs"
+			return m, nil
+		}
+		// Nothing is sent yet. The prompt below the list has to be answered first,
+		// and the answer is handled in modeConfirm above.
+		m.mode = modeConfirm
+		m.confirm = e.job.Name
+		return m, nil
 
 	case key.Matches(msg, m.keys.Open):
 		// The web UI page, not the job's resultsUrl. See SearchJobsPageURL.

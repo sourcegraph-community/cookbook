@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"path"
 	"strings"
 	"time"
 
@@ -27,6 +28,9 @@ var (
 	styleRed      = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	styleYellow   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styleSelected = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	// The delete prompt. Bold, because it is the one line in this dashboard that
+	// asks for something back instead of reporting what happened.
+	styleWarn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
 )
 
 // stateGlyph returns a marker and the style to draw it in.
@@ -63,7 +67,7 @@ func stateGlyph(state, spin string) (string, lipgloss.Style) {
 // and the rows themselves both derive theirs from this, so neither can drift out
 // from under the other.
 type jobColumns struct {
-	prefix, glyph, state, query, when, count int
+	prefix, glyph, state, query, when int
 	// Whether the time column is wide enough for a date as well as a clock.
 	withDate bool
 }
@@ -73,7 +77,6 @@ func columnsFor(width int) jobColumns {
 		prefixW = 2 // display cells, not bytes: "› " is 4 bytes wide
 		glyphW  = 2 // glyph plus its trailing space
 		stateW  = 11
-		countW  = 9
 		queryW  = 7 // the query never gets squeezed below this
 		stampW  = 22
 		clockW  = 9 // "15:04:05" plus the gap that keeps it off the query
@@ -81,11 +84,11 @@ func columnsFor(width int) jobColumns {
 
 	// The date is the first thing worth dropping when the terminal is narrow.
 	whenW := stampW
-	if width < prefixW+glyphW+stateW+stampW+countW+queryW {
+	if width < prefixW+glyphW+stateW+stampW+queryW {
 		whenW = clockW
 	}
 
-	queryCol := width - prefixW - glyphW - stateW - whenW - countW
+	queryCol := width - prefixW - glyphW - stateW - whenW
 	if queryCol < queryW {
 		queryCol = queryW
 	}
@@ -96,7 +99,6 @@ func columnsFor(width int) jobColumns {
 		state:    stateW,
 		query:    queryCol,
 		when:     whenW,
-		count:    countW,
 		withDate: whenW == stampW,
 	}
 }
@@ -112,8 +114,7 @@ func columnLabels(width int) string {
 	return strings.Repeat(" ", c.prefix+c.glyph) +
 		labelCell("status", c.state, false) +
 		labelCell("query", c.query, false) +
-		labelCell("finished", c.when, true) +
-		labelCell("lines", c.count, true)
+		labelCell("finished", c.when, true)
 }
 
 // labelCell underlines the label but not the padding around it, so the rule sits
@@ -156,15 +157,6 @@ func (d jobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 
 	// Right-hand cells are fixed width so they line up under their labels; the
 	// query takes whatever is left.
-	count := ""
-	if e.stats != nil {
-		count = fmtCount(e.stats.Lines)
-	} else if e.dl != nil {
-		count = "…"
-	} else if state == StateFailed || state == StateErrored {
-		count = "logs"
-	}
-
 	c := columnsFor(m.Width())
 
 	prefix := "  "
@@ -172,13 +164,12 @@ func (d jobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 		prefix = "› "
 	}
 
-	line := fmt.Sprintf("%s%s %s%s%s%s",
+	line := fmt.Sprintf("%s%s %s%s%s",
 		prefix,
 		glyphStyle.Render(glyph),
 		pad(PrettyState(state), c.state),
 		pad(query, c.query),
 		padLeft(fmtWhen(e, state, c.withDate), c.when),
-		padLeft(count, c.count),
 	)
 
 	if selected {
@@ -253,18 +244,25 @@ func (m model) render() string {
 	b.WriteString(m.renderDetail())
 	b.WriteString("\n")
 
-	// Status line.
-	status := m.status
-	if m.mode == modeHelp {
-		status = "press any key to close help"
+	// Status line. The delete prompt takes this row rather than a pane of its own,
+	// so asking the question does not change the height of the frame.
+	switch m.mode {
+	case modeConfirm:
+		b.WriteString(m.renderConfirm())
+	case modeHelp:
+		b.WriteString(styleDim.Render(truncate("press any key to close help", m.width)))
+	default:
+		b.WriteString(styleDim.Render(truncate(m.status, m.width)))
 	}
-	b.WriteString(styleDim.Render(truncate(status, m.width)))
 	b.WriteString("\n")
 
 	// Footer.
-	if m.mode == modeHelp {
+	switch m.mode {
+	case modeHelp:
 		b.WriteString(m.help.FullHelpView(m.keys.FullHelp()))
-	} else {
+	case modeConfirm:
+		b.WriteString(m.help.ShortHelpView(m.keys.ConfirmHelp()))
+	default:
 		b.WriteString(m.help.ShortHelpView(m.keys.ShortHelp()))
 	}
 
@@ -322,6 +320,28 @@ func (m model) renderDetail() string {
 	}
 
 	return name + "\n" + second
+}
+
+// renderConfirm is the question a pending delete is waiting on.
+//
+// It names the job and repeats its query, because an id on its own is not enough
+// to tell two jobs apart, and the query goes last so a long one is what the
+// truncation eats. A job that has not finished says so: deleting it throws away
+// work that is still running.
+func (m model) renderConfirm() string {
+	label := path.Base(m.confirm)
+	query := ""
+	if e := m.find(m.confirm); e != nil && e.job != nil {
+		query = e.job.Query
+		if !IsTerminal(e.job.State) {
+			label += " (still " + PrettyState(e.job.State) + ")"
+		}
+	}
+	prompt := "delete job " + label + "? this cannot be undone"
+	if query != "" {
+		prompt += " · " + query
+	}
+	return styleWarn.Render(truncate(prompt, m.width))
 }
 
 func (m model) renderProgress(e *jobEntry) string {

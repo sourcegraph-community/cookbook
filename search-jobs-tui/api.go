@@ -8,6 +8,7 @@
 //	POST /api/searchjobs.v1.Service/GetSearchJob      (scope: externalapi:read)
 //	POST /api/searchjobs.v1.Service/ListSearchJobs    (scope: externalapi:read)
 //	POST /api/searchjobs.v1.Service/CancelSearchJob   (scope: externalapi:write)
+//	POST /api/searchjobs.v1.Service/DeleteSearchJob   (scope: externalapi:write)
 //	GET  <SearchJob.resultsUrl>                       -> JSONL
 //	GET  <SearchJob.logsUrl> or /.api/search/export/<id>.log -> log text
 
@@ -118,6 +119,23 @@ func Unsupported(err error) bool {
 	return false
 }
 
+// NotFound reports whether the server says this job does not exist, as opposed
+// to not knowing the method.
+//
+// The distinction matters because ConnectRPC answers an unknown procedure with
+// HTTP 404 as well, so the status alone cannot tell "no such job" from "no such
+// method" and Unsupported says true to both. The code separates them: an unknown
+// procedure carries "unimplemented", a missing job carries "not_found". Check
+// this before Unsupported, or one deleted-behind-your-back job turns the delete
+// action off for the rest of the session.
+func NotFound(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return strings.EqualFold(apiErr.Code, "not_found")
+}
+
 // Unauthorized reports whether the token was rejected, which is worth saying
 // plainly because it is the most common setup mistake.
 func Unauthorized(err error) bool {
@@ -214,6 +232,16 @@ func (c *Client) ListSearchJobs(ctx context.Context) ([]*SearchJob, error) {
 // CancelSearchJob stops a running job. Best-effort, like ListSearchJobs.
 func (c *Client) CancelSearchJob(ctx context.Context, name string) error {
 	return c.rpc(ctx, "CancelSearchJob", map[string]string{"name": name}, nil)
+}
+
+// DeleteSearchJob removes a job and its stored results from the instance. This
+// is not the same as canceling: cancel stops the work and leaves the record,
+// delete takes the record away. It cannot be undone, which is why the dashboard
+// asks before calling it.
+//
+// Files already downloaded to --out-dir are local copies and are left alone.
+func (c *Client) DeleteSearchJob(ctx context.Context, name string) error {
+	return c.rpc(ctx, "DeleteSearchJob", map[string]string{"name": name}, nil)
 }
 
 // ResolveURL turns a SearchJob's resultsUrl or logsUrl into an absolute URL.
