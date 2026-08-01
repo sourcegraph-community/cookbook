@@ -1,0 +1,5 @@
+# Binary from `go build -o search-jobs-tui .`
+/search-jobs-tui
+
+# Downloaded result sets
+*.jsonl
