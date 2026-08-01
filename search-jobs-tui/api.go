@@ -9,6 +9,7 @@
 //	POST /api/searchjobs.v1.Service/ListSearchJobs    (scope: externalapi:read)
 //	POST /api/searchjobs.v1.Service/CancelSearchJob   (scope: externalapi:write)
 //	GET  <SearchJob.resultsUrl>                       -> JSONL
+//	GET  <SearchJob.logsUrl> or /.api/search/export/<id>.log -> log text
 
 package main
 
@@ -23,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"time"
 )
@@ -242,26 +244,61 @@ func (c *Client) SearchJobsPageURL() string {
 	return c.Endpoint + "/search-jobs"
 }
 
+// JobID pulls the numeric id out of users/{user}/searchJobs/{id}. It is the
+// same id the web UI shows and the one its log URLs are built from.
+func JobID(name string) string {
+	id := path.Base(name)
+	if id == "" || id == "." || id == "/" {
+		return ""
+	}
+	return id
+}
+
+// LogsURLFor returns where to fetch one job's log, a CSV of every repository
+// and revision the job touched with a status and failure message for each.
+//
+// A job's logsUrl, when the instance sends one, is a URL reference under /api/
+// and is used as is. Prefer it: it is the external API, so externalapi:read is
+// enough. Instances that leave the field empty still have the log. The web UI's
+// "View logs" button never reads logsUrl either; it GETs
+// /.api/search/export/{id}.log with the id already in the job record, and that
+// is the fallback here. It is the internal API, which a token can reach only
+// with the broader user:all scope, so it answers 403 for a read-only token.
+func (c *Client) LogsURLFor(job *SearchJob) string {
+	if job == nil {
+		return ""
+	}
+	if job.LogsURL != "" {
+		return job.LogsURL
+	}
+	id := JobID(job.Name)
+	if id == "" {
+		return ""
+	}
+	return "/.api/search/export/" + id + ".log"
+}
+
 // DownloadStats is what a finished download produced.
 type DownloadStats struct {
 	Lines int64
 	Bytes int64
 }
 
-// DownloadResults streams a completed job's JSONL to outPath.
+// Download streams one URL to outPath, counting lines as it goes. It backs both
+// the results (JSONL) and the logs transfer; the only difference is the URL.
 //
 // onProgress is called with the bytes written so far and the total the server
 // declared, or -1 when it streamed without a Content-Length. It is throttled to
 // roughly 20 calls a second and always fires once more at the end. The body is
 // never held in memory: a result set can be hundreds of megabytes.
-func (c *Client) DownloadResults(
+func (c *Client) Download(
 	ctx context.Context,
-	resultsURL, outPath string,
+	srcURL, outPath string,
 	onProgress func(done, total int64),
 ) (DownloadStats, error) {
 	var stats DownloadStats
 
-	target, err := c.ResolveURL(resultsURL)
+	target, err := c.ResolveURL(srcURL)
 	if err != nil {
 		return stats, err
 	}

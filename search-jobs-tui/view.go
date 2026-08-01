@@ -14,9 +14,9 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Rows below the list that always exist: header, blank, input, blank,
-// detail, progress, status, help.
-const chromeHeight = 8
+// Rows outside the list that always exist: header, blank, input, blank,
+// blank, detail, progress, status, help.
+const chromeHeight = 9
 
 var (
 	styleTitle    = lipgloss.NewStyle().Bold(true)
@@ -85,8 +85,7 @@ func (d jobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 
 	// Right-hand columns are fixed width so they line up; the query takes
 	// whatever is left.
-	elapsed := fmtDuration(e.elapsed())
-	count := "—"
+	count := ""
 	if e.stats != nil {
 		count = fmtCount(e.stats.Lines)
 	} else if e.dl != nil {
@@ -96,20 +95,29 @@ func (d jobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 	}
 
 	const (
-		prefixW  = 2 // display cells, not bytes: "› " is 4 bytes wide
-		glyphW   = 2 // glyph plus its trailing space
-		stateW   = 11
-		elapsedW = 8
-		countW   = 9
+		prefixW = 2 // display cells, not bytes: "› " is 4 bytes wide
+		glyphW  = 2 // glyph plus its trailing space
+		stateW  = 11
+		countW  = 9
+		queryW  = 7 // the query never gets squeezed below this
+		stampW  = 22
+		clockW  = 9 // "15:04:05" plus the gap that keeps it off the query
 	)
 	prefix := "  "
 	if selected {
 		prefix = "› "
 	}
 
-	avail := m.Width() - prefixW - glyphW - stateW - elapsedW - countW
-	if avail < 8 {
-		avail = 8
+	// The date is the first thing worth dropping when the terminal is narrow.
+	timeW := stampW
+	if m.Width() < prefixW+glyphW+stateW+stampW+countW+queryW {
+		timeW = clockW
+	}
+	when := fmtWhen(e, state, timeW == stampW)
+
+	avail := m.Width() - prefixW - glyphW - stateW - timeW - countW
+	if avail < queryW {
+		avail = queryW
 	}
 
 	stateText := pad(PrettyState(state), stateW)
@@ -119,7 +127,7 @@ func (d jobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 		glyphStyle.Render(glyph),
 		stateText,
 		queryText,
-		padLeft(elapsed, elapsedW),
+		padLeft(when, timeW),
 		padLeft(count, countW),
 	)
 
@@ -178,10 +186,10 @@ func (m model) render() string {
 		b.WriteString(styleDim.Render("  no jobs yet — press n to create one"))
 		// Pad to the same height the list would have occupied, so the panes
 		// below it do not move when the first job appears.
-		b.WriteString(strings.Repeat("\n", max(1, m.height-chromeHeight)))
+		b.WriteString(strings.Repeat("\n", max(2, m.height-chromeHeight+1)))
 	} else {
 		b.WriteString(m.list.View())
-		b.WriteString("\n")
+		b.WriteString("\n\n")
 	}
 
 	// Detail pane for the selection.
@@ -230,19 +238,23 @@ func (m model) renderDetail() string {
 
 	name := styleDim.Render(truncate(e.job.Name, m.width))
 
+	donePath, doneStats, doneKind := e.donePath()
+
 	var second string
 	switch {
 	case e.dl != nil:
 		second = m.renderProgress(e)
-	case e.stats != nil:
-		second = styleDim.Render(truncate(fmt.Sprintf("%s lines · %s · %s",
-			fmtCount(e.stats.Lines), fmtBytes(e.stats.Bytes), e.outPath), m.width))
+	case doneStats != nil:
+		second = styleDim.Render(truncate(fmt.Sprintf("%s lines · %s · %s · %s",
+			fmtCount(doneStats.Lines), fmtBytes(doneStats.Bytes), doneKind.label(), donePath), m.width))
 	case e.err != nil:
 		second = styleRed.Render(truncate(e.err.Error(), m.width))
 	case e.job.State == StateCompleted:
-		second = styleDim.Render("press d to download results")
-	case e.job.LogsURL != "":
-		second = styleDim.Render(truncate("logs: "+e.job.LogsURL, m.width))
+		second = styleDim.Render("press d to download results, l for logs")
+	case e.job.State == StateFailed:
+		// Failed is where the log actually matters: it is the only explanation
+		// the API ever gives for a rejected query.
+		second = styleDim.Render("press l to download the logs")
 	case !IsTerminal(e.job.State):
 		// MiniDot frames carry no trailing space, unlike Dot, so the gap is
 		// spelled out here.
@@ -311,6 +323,26 @@ func fmtBytes(n int64) string {
 		return fmt.Sprintf("%.1f %s", v, units[i])
 	}
 	return fmt.Sprintf("%.0f %s", v, units[i])
+}
+
+// fmtWhen fills the row's time column: local wall-clock time for a job that has
+// finished, a running total for one that has not.
+//
+// The API reports no end time, so a finish is only known for a transition this
+// process watched or recorded in the store on an earlier run. A job that was
+// already terminal when the dashboard first saw it gets a blank cell, which is
+// the honest answer; timing it from its create time would invent a duration.
+func fmtWhen(e *jobEntry, state string, withDate bool) string {
+	if !e.endedAt.IsZero() {
+		if withDate {
+			return e.endedAt.Local().Format("2006-01-02 | 15:04:05")
+		}
+		return e.endedAt.Local().Format("15:04:05")
+	}
+	if IsTerminal(state) {
+		return ""
+	}
+	return fmtDuration(e.elapsed())
 }
 
 func fmtDuration(d time.Duration) string {

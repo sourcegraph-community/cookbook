@@ -32,7 +32,7 @@ func main() {
 	var (
 		query  = flag.String("query", "", "submit this query at startup")
 		poll   = flag.Duration("poll", 5*time.Second, "how often to check job status")
-		outDir = flag.String("out-dir", ".", "where downloaded JSONL is written")
+		outDir = flag.String("out-dir", ".", "where downloaded results and logs are written")
 		store  = flag.String("state", DefaultStorePath(), "file remembering jobs between runs")
 	)
 	flag.Parse()

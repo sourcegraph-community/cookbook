@@ -110,6 +110,21 @@ func TestSpinnerFrameKeepsRowWidth(t *testing.T) {
 	}
 }
 
+// The one-line help bar is cut off at its right-hand end, which is where q quit
+// sits, so adding one more key can silently push quit off an 80-column terminal.
+func TestShortHelpFitsAnEightyColumnTerminal(t *testing.T) {
+	m := testModel(80, 24)
+	bar := stripANSI(m.help.ShortHelpView(m.keys.ShortHelp()))
+	if n := len([]rune(bar)); n > 80 {
+		t.Errorf("short help is %d cells: %q", n, bar)
+	}
+	for _, want := range []string{"logs", "quit"} {
+		if !strings.Contains(bar, want) {
+			t.Errorf("short help does not mention %q: %q", want, bar)
+		}
+	}
+}
+
 // stripANSI removes escape sequences so widths can be measured.
 func stripANSI(s string) string {
 	var b strings.Builder
@@ -147,6 +162,32 @@ func TestFmtDuration(t *testing.T) {
 	for in, want := range cases {
 		if got := fmtDuration(in); got != want {
 			t.Errorf("fmtDuration(%v) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFmtWhen(t *testing.T) {
+	done := time.Date(2026, 8, 1, 9, 18, 3, 0, time.Local)
+	running := &jobEntry{createdAt: time.Now().Add(-90 * time.Second)}
+	finished := &jobEntry{createdAt: done.Add(-time.Minute), endedAt: done}
+
+	cases := []struct {
+		name     string
+		e        *jobEntry
+		state    string
+		withDate bool
+		want     string
+	}{
+		{"finished wide", finished, StateCompleted, true, "2026-08-01 | 09:18:03"},
+		{"finished narrow", finished, StateCompleted, false, "09:18:03"},
+		{"running shows elapsed", running, StateProcessing, true, "1m 30s"},
+		// Terminal before this process ever saw it: no finish time exists, and
+		// timing from the create time would invent one.
+		{"terminal without a finish time", running, StateCompleted, true, ""},
+	}
+	for _, tc := range cases {
+		if got := fmtWhen(tc.e, tc.state, tc.withDate); got != tc.want {
+			t.Errorf("%s: fmtWhen = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }
@@ -204,7 +245,61 @@ func TestPasteFillsTheQueryInput(t *testing.T) {
 }
 
 func TestOutFileNameFor(t *testing.T) {
-	if got := outFileNameFor("users/alice/searchJobs/42"); got != "searchjob-42.jsonl" {
+	if got := outFileNameFor("users/alice/searchJobs/42", ".jsonl"); got != "searchjob-42.jsonl" {
 		t.Errorf("got %q", got)
+	}
+	if got := outFileNameFor("users/alice/searchJobs/42", ".log"); got != "searchjob-42.log" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// The web UI's "View logs" button ignores logsUrl and GETs
+// /.api/search/export/{id}.log. Instances that send logsUrl are taken at their
+// word; the rest get that path built from the id in the job name.
+func TestLogsURLFor(t *testing.T) {
+	c := NewClient("https://demo.sourcegraph.com", "t")
+	cases := []struct {
+		name string
+		job  *SearchJob
+		want string
+	}{
+		{"no logsUrl", &SearchJob{Name: "users/129/searchJobs/145"}, "/.api/search/export/145.log"},
+		{"logsUrl wins", &SearchJob{Name: "users/129/searchJobs/145", LogsURL: "/api/users/129/searchJobs/145/logs.log"},
+			"/api/users/129/searchJobs/145/logs.log"},
+		{"no id", &SearchJob{Name: ""}, ""},
+		{"no job", nil, ""},
+	}
+	for _, tc := range cases {
+		if got := c.LogsURLFor(tc.job); got != tc.want {
+			t.Errorf("%s: LogsURLFor = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	// The fallback is a reference, so it has to resolve against the endpoint.
+	got, err := c.ResolveURL(c.LogsURLFor(&SearchJob{Name: "users/129/searchJobs/145"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://demo.sourcegraph.com/.api/search/export/145.log"; got != want {
+		t.Errorf("resolved = %q, want %q", got, want)
+	}
+}
+
+// Only one transfer runs per job, so pressing l during a results download says
+// so instead of starting a second one that would fight over the same slot.
+func TestOneTransferPerJob(t *testing.T) {
+	m := testModel(80, 24, &SearchJob{
+		Name: "users/a/searchJobs/1", Query: "x", State: StateCompleted,
+		ResultsURL: "/api/users/a/searchJobs/1/results.jsonl",
+	})
+	e := m.jobs[0]
+	e.dl = &download{kind: transferResults, total: -1}
+
+	msg := m.beginDownload(e, transferLogs)()
+	if got, want := string(msg.(statusMsg)), "already downloading results"; got != want {
+		t.Errorf("status = %q, want %q", got, want)
+	}
+	if e.logPath != "" {
+		t.Errorf("logPath = %q, want empty", e.logPath)
 	}
 }

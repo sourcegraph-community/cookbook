@@ -42,6 +42,29 @@ const (
 	modeHelp
 )
 
+// transferKind distinguishes the two things a job has to download. They share
+// one code path; only the URL, the file extension, and the wording differ.
+type transferKind int
+
+const (
+	transferResults transferKind = iota
+	transferLogs
+)
+
+func (k transferKind) label() string {
+	if k == transferLogs {
+		return "logs"
+	}
+	return "results"
+}
+
+func (k transferKind) ext() string {
+	if k == transferLogs {
+		return ".log"
+	}
+	return ".jsonl"
+}
+
 // jobEntry is one row: the server's view of a job plus what this process knows
 // about it.
 type jobEntry struct {
@@ -50,8 +73,28 @@ type jobEntry struct {
 	endedAt   time.Time
 	outPath   string
 	stats     *DownloadStats
-	err       error
-	dl        *download
+	logPath   string
+	logStats  *DownloadStats
+	// Which transfer finished most recently, so the detail pane reports that one
+	// when a job has both a result set and a log on disk.
+	lastDone transferKind
+	err      error
+	dl       *download
+}
+
+// donePath and doneStats report the finished transfer the detail pane should
+// show: the most recent one, falling back to whichever exists.
+func (e *jobEntry) donePath() (string, *DownloadStats, transferKind) {
+	if e.lastDone == transferLogs && e.logStats != nil {
+		return e.logPath, e.logStats, transferLogs
+	}
+	if e.stats != nil {
+		return e.outPath, e.stats, transferResults
+	}
+	if e.logStats != nil {
+		return e.logPath, e.logStats, transferLogs
+	}
+	return "", nil, transferResults
 }
 
 // elapsed is how long the job has been running, frozen once it finishes.
@@ -62,8 +105,10 @@ func (e *jobEntry) elapsed() time.Duration {
 	return time.Since(e.createdAt)
 }
 
-// download tracks one in-flight results transfer.
+// download tracks one in-flight transfer. A job runs at most one at a time, so
+// there is a single progress bar to read and cancel is unambiguous.
 type download struct {
+	kind      transferKind
 	cancel    context.CancelFunc
 	ch        chan tea.Msg
 	startedAt time.Time
@@ -85,7 +130,12 @@ func (i jobItem) FilterValue() string {
 // --- messages ---------------------------------------------------------------
 
 type tickMsg time.Time
-type jobsLoadedMsg struct{ jobs []*SearchJob }
+type jobsLoadedMsg struct {
+	jobs []*SearchJob
+	// Finish times recovered from the store, keyed by job name. The server does
+	// not report one, so this is the only way a restart keeps them.
+	ended map[string]time.Time
+}
 type jobCreatedMsg struct {
 	job *SearchJob
 	err error
@@ -105,6 +155,7 @@ type dlProgressMsg struct {
 }
 type dlDoneMsg struct {
 	name  string
+	kind  transferKind
 	stats DownloadStats
 	err   error
 }
@@ -118,6 +169,7 @@ type keyMap struct {
 	New      key.Binding
 	Submit   key.Binding
 	Download key.Binding
+	Logs     key.Binding
 	Cancel   key.Binding
 	Open     key.Binding
 	Help     key.Binding
@@ -132,22 +184,27 @@ func defaultKeys() keyMap {
 		New:      key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
 		Submit:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit")),
 		Download: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "download")),
-		Cancel:   key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "cancel")),
-		Open:     key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in browser")),
-		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:     key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-		Escape:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		// Labeled "logs" rather than "log download" because the one-line help bar
+		// has to fit an 80-column terminal, and anything past the edge is cut off
+		// the right-hand end, which is where q lives. The full list spells it out.
+		Logs:   key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "logs")),
+		Cancel: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "cancel")),
+		Open:   key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in browser")),
+		Help:   key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:   key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Escape: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 	}
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.New, k.Download, k.Cancel, k.Open, k.Help, k.Quit}
+	return []key.Binding{k.New, k.Download, k.Logs, k.Cancel, k.Open, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
+	logs := key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "log download"))
 	return [][]key.Binding{
 		{k.Up, k.Down, k.New, k.Submit},
-		{k.Download, k.Cancel, k.Open},
+		{k.Download, logs, k.Cancel, k.Open},
 		{k.Help, k.Escape, k.Quit},
 	}
 }
@@ -196,6 +253,12 @@ func newModel(c *Client, outDir, storePath string, pollEvery time.Duration, init
 	// cell would shift every column to its right.
 	sp.Spinner = spinner.MiniDot
 
+	// Key letters take the spinner's cyan so the pressable part of the help bar
+	// separates from its label at a glance.
+	h := help.New()
+	h.Styles.ShortKey = styleCyan
+	h.Styles.FullKey = styleCyan
+
 	m := model{
 		client:    c,
 		outDir:    outDir,
@@ -206,7 +269,7 @@ func newModel(c *Client, outDir, storePath string, pollEvery time.Duration, init
 		// The percentage is rendered alongside the bar, not inside it.
 		progress: progress.New(progress.WithDefaultBlend(), progress.WithoutPercentage()),
 		spinner:  sp,
-		help:     help.New(),
+		help:     h,
 		keys:     defaultKeys(),
 		mode:     modeList,
 		canStop:  true,
@@ -236,17 +299,27 @@ func loadJobsCmd(c *Client, storePath string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
+		// Read the cache either way: even when the server answers, it is the only
+		// source of finish times.
+		stored := LoadStore(storePath)
+		ended := make(map[string]time.Time, len(stored))
+		for _, s := range stored {
+			if !s.EndedAt.IsZero() {
+				ended[s.Name] = s.EndedAt
+			}
+		}
+
 		if jobs, err := c.ListSearchJobs(ctx); err == nil {
-			return jobsLoadedMsg{jobs: jobs}
+			return jobsLoadedMsg{jobs: jobs, ended: ended}
 		} else if Unauthorized(err) {
 			return statusMsg("auth failed: " + err.Error())
 		}
 
 		var jobs []*SearchJob
-		for _, s := range LoadStore(storePath) {
+		for _, s := range stored {
 			jobs = append(jobs, &SearchJob{Name: s.Name, Query: s.Query, State: StateUnspecified})
 		}
-		return jobsLoadedMsg{jobs: jobs}
+		return jobsLoadedMsg{jobs: jobs, ended: ended}
 	}
 }
 
@@ -340,38 +413,67 @@ func (m *model) persist() {
 		if e.job == nil {
 			continue
 		}
-		jobs = append(jobs, StoredJob{Name: e.job.Name, Query: e.job.Query, CreatedAt: e.createdAt})
+		jobs = append(jobs, StoredJob{
+			Name:      e.job.Name,
+			Query:     e.job.Query,
+			CreatedAt: e.createdAt,
+			EndedAt:   e.endedAt,
+		})
 	}
 	_ = SaveStore(m.storePath, jobs, storeLimit)
 }
 
-// outFileNameFor turns users/alice/searchJobs/42 into searchjob-42.jsonl.
-func outFileNameFor(name string) string {
-	id := path.Base(name)
-	if id == "" || id == "." || id == "/" {
+// outFileNameFor turns users/alice/searchJobs/42 into searchjob-42.jsonl, or
+// searchjob-42.log for a log transfer.
+func outFileNameFor(name, ext string) string {
+	id := JobID(name)
+	if id == "" {
 		id = "results"
 	}
-	return "searchjob-" + id + ".jsonl"
+	return "searchjob-" + id + ext
 }
 
-func (m *model) beginDownload(e *jobEntry) tea.Cmd {
-	if e.job == nil || e.job.ResultsURL == "" {
-		return func() tea.Msg { return statusMsg("no results to download yet") }
+func status(s string) tea.Cmd {
+	return func() tea.Msg { return statusMsg(s) }
+}
+
+func (m *model) beginDownload(e *jobEntry, kind transferKind) tea.Cmd {
+	if e.job == nil {
+		return nil
 	}
 	if e.dl != nil {
-		return func() tea.Msg { return statusMsg("already downloading") }
+		return status("already downloading " + e.dl.kind.label())
 	}
+
+	var srcURL string
+	switch kind {
+	case transferLogs:
+		srcURL = m.client.LogsURLFor(e.job)
+		if srcURL == "" {
+			return status("no logs for this job")
+		}
+	default:
+		srcURL = e.job.ResultsURL
+		if srcURL == "" {
+			return status("no results to download yet")
+		}
+	}
+	outPath := path.Join(m.outDir, outFileNameFor(e.job.Name, kind.ext()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan tea.Msg, 64)
-	e.dl = &download{cancel: cancel, ch: ch, startedAt: time.Now(), total: -1}
-	e.outPath = path.Join(m.outDir, outFileNameFor(e.job.Name))
+	e.dl = &download{kind: kind, cancel: cancel, ch: ch, startedAt: time.Now(), total: -1}
+	if kind == transferLogs {
+		e.logPath = outPath
+	} else {
+		e.outPath = outPath
+	}
 
-	name, url, outPath := e.job.Name, e.job.ResultsURL, e.outPath
+	name := e.job.Name
 	client := m.client
 
 	go func() {
-		stats, err := client.DownloadResults(ctx, url, outPath, func(done, total int64) {
+		stats, err := client.Download(ctx, srcURL, outPath, func(done, total int64) {
 			// Non-blocking: if the UI has not drained the last sample yet,
 			// drop this one. A fresher number is always right behind it.
 			select {
@@ -379,7 +481,7 @@ func (m *model) beginDownload(e *jobEntry) tea.Cmd {
 			default:
 			}
 		})
-		ch <- dlDoneMsg{name: name, stats: stats, err: err}
+		ch <- dlDoneMsg{name: name, kind: kind, stats: stats, err: err}
 		close(ch)
 	}()
 
@@ -447,7 +549,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.find(j.Name) != nil {
 				continue
 			}
-			m.jobs = append(m.jobs, &jobEntry{job: j, createdAt: parseCreateTime(j)})
+			m.jobs = append(m.jobs, &jobEntry{
+				job:       j,
+				createdAt: parseCreateTime(j),
+				endedAt:   msg.ended[j.Name],
+			})
 		}
 		cmds = append(cmds, m.syncList())
 		if c := m.pollDue(); c != nil {
@@ -482,6 +588,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		e.job = msg.job
 		if !wasTerminal && IsTerminal(msg.job.State) {
 			e.endedAt = time.Now()
+			m.persist()
 		}
 
 	case cancelDoneMsg:
@@ -514,21 +621,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.Is(msg.err, context.Canceled) {
 				// A canceled transfer leaves a truncated file that looks like a
 				// complete result set. Remove it rather than leave the trap.
-				if e.outPath != "" {
-					_ = os.Remove(e.outPath)
+				if msg.kind == transferLogs {
+					if e.logPath != "" {
+						_ = os.Remove(e.logPath)
+					}
+					e.logPath = ""
+				} else {
+					if e.outPath != "" {
+						_ = os.Remove(e.outPath)
+					}
+					e.outPath = ""
 				}
-				e.outPath = ""
-				m.status = "download canceled"
+				m.status = msg.kind.label() + " download canceled"
 			} else {
 				e.err = msg.err
-				m.status = "download failed: " + msg.err.Error()
+				m.status = msg.kind.label() + " download failed: " + msg.err.Error()
 			}
 			break
 		}
 		stats := msg.stats
-		e.stats = &stats
-		m.status = fmt.Sprintf("wrote %s line(s) to %s (%s)",
-			fmtCount(stats.Lines), e.outPath, fmtBytes(stats.Bytes))
+		outPath := e.outPath
+		if msg.kind == transferLogs {
+			e.logStats = &stats
+			outPath = e.logPath
+		} else {
+			e.stats = &stats
+		}
+		e.lastDone = msg.kind
+		m.status = fmt.Sprintf("wrote %s line(s) of %s to %s (%s)",
+			fmtCount(stats.Lines), msg.kind.label(), outPath, fmtBytes(stats.Bytes))
 
 	case statusMsg:
 		m.status = string(msg)
@@ -613,7 +734,21 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.status = "only completed jobs have results"
 			return m, nil
 		}
-		return m, m.beginDownload(e)
+		return m, m.beginDownload(e, transferResults)
+
+	case key.Matches(msg, m.keys.Logs):
+		e := m.selected()
+		if e == nil || e.job == nil {
+			return m, nil
+		}
+		// A queued job has not run yet, so there is nothing to log. Every other
+		// state has a log worth reading, and it is the only explanation a failed
+		// job ever gives.
+		if e.job.State == StateQueued {
+			m.status = "no logs until the job starts"
+			return m, nil
+		}
+		return m, m.beginDownload(e, transferLogs)
 
 	case key.Matches(msg, m.keys.Cancel):
 		e := m.selected()
@@ -621,8 +756,8 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if e.dl != nil {
+			m.status = "canceling " + e.dl.kind.label() + " download…"
 			e.dl.cancel()
-			m.status = "canceling download…"
 			return m, nil
 		}
 		if !m.canStop {

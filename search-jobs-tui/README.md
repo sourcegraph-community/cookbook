@@ -43,7 +43,7 @@ export SRC_ACCESS_TOKEN="sgp_..."
 go run .
 ```
 
-Press `n`, type a query, press enter. Repeat for as many queries as you want to run. Press `d` on a completed job to download its results.
+Press `n`, type a query, press enter. Repeat for as many queries as you want to run. Press `d` on a completed job to download its results, or `l` for its log.
 
 Start with a query already running:
 
@@ -66,7 +66,8 @@ go build -o search-jobs-tui .
 | `cmd-v` `ctrl-v` | Paste a query. Works from the list too, which opens the query box |
 | `enter` | Submit the query |
 | `esc` | Leave the query box |
-| `d` | Download the selected completed job |
+| `d` | Download the selected completed job's results |
+| `l` | Download the selected job's log |
 | `c` | Cancel the selected running job, or an in-flight download |
 | `o` | Open the Search Jobs page in a browser |
 | `?` | Full key list |
@@ -78,7 +79,7 @@ go build -o search-jobs-tui .
 | --- | --- | --- |
 | `--query <q>` | none | Submit this query at startup. |
 | `--poll <dur>` | `5s` | How long to wait between status checks. |
-| `--out-dir <dir>` | `.` | Where downloaded JSONL is written. |
+| `--out-dir <dir>` | `.` | Where downloads are written: `searchjob-<id>.jsonl` for results, `searchjob-<id>.log` for logs. |
 | `--state <path>` | platform cache dir | File remembering jobs between runs. |
 
 ## How it works
@@ -88,10 +89,13 @@ The same three calls as the [search-jobs-api](../search-jobs-api/) recipe, plus 
 1. `POST /api/searchjobs.v1.Service/CreateSearchJob` with body `{"parent": "users/-", "searchJob": {"query": "..."}}`. The `users/-` parent means the authenticated user. Needs `externalapi:write`.
 2. `POST /api/searchjobs.v1.Service/GetSearchJob` with body `{"name": "..."}`. Needs `externalapi:read`.
 3. `GET` the completed job's `resultsUrl`, which streams JSONL.
-4. `POST /api/searchjobs.v1.Service/ListSearchJobs` populates the dashboard at startup.
-5. `POST /api/searchjobs.v1.Service/CancelSearchJob` stops a running job.
+4. `GET` the job's `logsUrl`, which streams the log as CSV.
+5. `POST /api/searchjobs.v1.Service/ListSearchJobs` populates the dashboard at startup.
+6. `POST /api/searchjobs.v1.Service/CancelSearchJob` stops a running job.
 
 The last two are best-effort. An instance that does not implement them returns an error that `Unsupported` in `api.go` recognizes, and the dashboard quietly does without: it falls back to a local cache of job names for the list, and it hides the cancel action. Check your instance's own reference at `$SRC_ENDPOINT/api-reference` for what it actually supports.
+
+The log is a CSV, one row per repository and revision the job touched, with a status and a failure message for each. It is the only explanation a rejected query ever gets, and it is worth reading on a job that succeeded too: that is where partial coverage shows up. `l` fetches it for any job that has started. An instance that sends no `logsUrl` falls back to `/.api/search/export/<id>.log`, which is what the web UI's own "View logs" button requests, built from the numeric id already in the job record. That path is the internal API, so a token needs the broader `user:all` scope to use it; `logsUrl` needs only `externalapi:read`, which is why it is preferred.
 
 Four things needed more than the framework gives you.
 
@@ -123,7 +127,7 @@ They pin the things that break quietly: every frame fills the window exactly, no
 
 **The job list is empty on a fresh machine.** Either this instance does not implement `ListSearchJobs`, in which case only jobs created through this tool are remembered, or there are genuinely no jobs. Create one with `n`.
 
-**A job fails immediately.** Some queries are not supported by Search Jobs, including catch-all regular expressions like `.*`, file predicates, multiple `rev` filters, and `index:` filters. The failed job's `logsUrl` is shown under it; fetch it with your token:
+**A job fails immediately.** Some queries are not supported by Search Jobs, including catch-all regular expressions like `.*`, file predicates, multiple `rev` filters, and `index:` filters. Press `l` on the failed job to write its log to `--out-dir` as `searchjob-<id>.log`, or fetch it yourself:
 
 ```bash
 curl -s -H "Authorization: token $SRC_ACCESS_TOKEN" \

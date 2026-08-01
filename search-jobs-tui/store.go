@@ -14,10 +14,14 @@ import (
 )
 
 // StoredJob is the minimum needed to find a job again after a restart.
+//
+// EndedAt is here because the API does not report one: if this process does not
+// write down when a job reached a terminal state, that time is lost on exit.
 type StoredJob struct {
 	Name      string    `json:"name"`
 	Query     string    `json:"query"`
 	CreatedAt time.Time `json:"createdAt"`
+	EndedAt   time.Time `json:"endedAt,omitzero"`
 }
 
 // DefaultStorePath is ~/.cache/sourcegraph-search-jobs/jobs.json on Linux and
