@@ -15,12 +15,13 @@ import (
 )
 
 // Rows outside the list that always exist: header, blank, input, blank,
-// blank, detail, progress, status, help.
-const chromeHeight = 9
+// column labels, blank, detail, progress, status, help.
+const chromeHeight = 10
 
 var (
 	styleTitle    = lipgloss.NewStyle().Bold(true)
 	styleDim      = lipgloss.NewStyle().Faint(true)
+	styleColumn   = lipgloss.NewStyle().Faint(true).Underline(true)
 	styleCyan     = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	styleGreen    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styleRed      = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
@@ -56,6 +57,76 @@ func stateGlyph(state, spin string) (string, lipgloss.Style) {
 	}
 }
 
+// --- columns ----------------------------------------------------------------
+
+// jobColumns is the width of every cell in a job row. The labels above the list
+// and the rows themselves both derive theirs from this, so neither can drift out
+// from under the other.
+type jobColumns struct {
+	prefix, glyph, state, query, when, count int
+	// Whether the time column is wide enough for a date as well as a clock.
+	withDate bool
+}
+
+func columnsFor(width int) jobColumns {
+	const (
+		prefixW = 2 // display cells, not bytes: "› " is 4 bytes wide
+		glyphW  = 2 // glyph plus its trailing space
+		stateW  = 11
+		countW  = 9
+		queryW  = 7 // the query never gets squeezed below this
+		stampW  = 22
+		clockW  = 9 // "15:04:05" plus the gap that keeps it off the query
+	)
+
+	// The date is the first thing worth dropping when the terminal is narrow.
+	whenW := stampW
+	if width < prefixW+glyphW+stateW+stampW+countW+queryW {
+		whenW = clockW
+	}
+
+	queryCol := width - prefixW - glyphW - stateW - whenW - countW
+	if queryCol < queryW {
+		queryCol = queryW
+	}
+
+	return jobColumns{
+		prefix:   prefixW,
+		glyph:    glyphW,
+		state:    stateW,
+		query:    queryCol,
+		when:     whenW,
+		count:    countW,
+		withDate: whenW == stampW,
+	}
+}
+
+// columnLabels is the header row over the job list. The marker column has no
+// label, so its cells are spaces.
+//
+// The labels are underlined instead of ruled off with a line of their own: a
+// rule would cost a row of the list on every terminal, and a 24-row window has
+// few enough to begin with.
+func columnLabels(width int) string {
+	c := columnsFor(width)
+	return strings.Repeat(" ", c.prefix+c.glyph) +
+		labelCell("status", c.state, false) +
+		labelCell("query", c.query, false) +
+		labelCell("finished", c.when, true) +
+		labelCell("lines", c.count, true)
+}
+
+// labelCell underlines the label but not the padding around it, so the rule sits
+// under words rather than running the width of the window.
+func labelCell(label string, w int, right bool) string {
+	label = truncate(label, w)
+	gap := strings.Repeat(" ", max(0, w-len([]rune(label))))
+	if right {
+		return gap + styleColumn.Render(label)
+	}
+	return styleColumn.Render(label) + gap
+}
+
 // --- list delegate ----------------------------------------------------------
 
 type jobDelegate struct {
@@ -83,8 +154,8 @@ func (d jobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 
 	glyph, glyphStyle := stateGlyph(state, d.spin)
 
-	// Right-hand columns are fixed width so they line up; the query takes
-	// whatever is left.
+	// Right-hand cells are fixed width so they line up under their labels; the
+	// query takes whatever is left.
 	count := ""
 	if e.stats != nil {
 		count = fmtCount(e.stats.Lines)
@@ -94,41 +165,20 @@ func (d jobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 		count = "logs"
 	}
 
-	const (
-		prefixW = 2 // display cells, not bytes: "› " is 4 bytes wide
-		glyphW  = 2 // glyph plus its trailing space
-		stateW  = 11
-		countW  = 9
-		queryW  = 7 // the query never gets squeezed below this
-		stampW  = 22
-		clockW  = 9 // "15:04:05" plus the gap that keeps it off the query
-	)
+	c := columnsFor(m.Width())
+
 	prefix := "  "
 	if selected {
 		prefix = "› "
 	}
 
-	// The date is the first thing worth dropping when the terminal is narrow.
-	timeW := stampW
-	if m.Width() < prefixW+glyphW+stateW+stampW+countW+queryW {
-		timeW = clockW
-	}
-	when := fmtWhen(e, state, timeW == stampW)
-
-	avail := m.Width() - prefixW - glyphW - stateW - timeW - countW
-	if avail < queryW {
-		avail = queryW
-	}
-
-	stateText := pad(PrettyState(state), stateW)
-	queryText := pad(truncate(query, avail), avail)
 	line := fmt.Sprintf("%s%s %s%s%s%s",
 		prefix,
 		glyphStyle.Render(glyph),
-		stateText,
-		queryText,
-		padLeft(when, timeW),
-		padLeft(count, countW),
+		pad(PrettyState(state), c.state),
+		pad(query, c.query),
+		padLeft(fmtWhen(e, state, c.withDate), c.when),
+		padLeft(count, c.count),
 	)
 
 	if selected {
@@ -143,9 +193,11 @@ func (m *model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
+	// One row is the floor. Clamping higher than that would make the list taller
+	// than the space left for it and push the footer off a short window.
 	h := m.height - chromeHeight
-	if h < 3 {
-		h = 3
+	if h < 1 {
+		h = 1
 	}
 	m.list.SetSize(m.width, h)
 	m.input.SetWidth(max(20, m.width-8))
@@ -181,7 +233,12 @@ func (m model) render() string {
 	}
 	b.WriteString("\n\n")
 
-	// Job list, or an empty-state hint.
+	// Column labels, then the job rows or an empty-state hint. The labels stay up
+	// even with nothing under them, so the panes below do not move when the first
+	// job appears.
+	b.WriteString(columnLabels(m.width))
+	b.WriteString("\n")
+
 	if len(m.jobs) == 0 {
 		b.WriteString(styleDim.Render("  no jobs yet — press n to create one"))
 		// Pad to the same height the list would have occupied, so the panes

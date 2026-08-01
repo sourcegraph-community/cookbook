@@ -110,6 +110,37 @@ func TestSpinnerFrameKeepsRowWidth(t *testing.T) {
 	}
 }
 
+// Labels that do not sit over the cells they name are worse than no labels. Both
+// are built from columnsFor, so this checks the two agree at several widths: the
+// header is the same width as a row, and each right-hand label ends where its
+// cell does.
+func TestColumnLabelsLineUpWithRows(t *testing.T) {
+	jobs := []*SearchJob{
+		{Name: "users/a/searchJobs/1", Query: "context:global TODO count:all", State: StateCompleted},
+	}
+	for _, w := range []int{40, 60, 80, 200} {
+		m := testModel(w, 24, jobs...)
+		m.jobs[0].endedAt = time.Now()
+
+		header := stripANSI(columnLabels(w))
+		row := stripANSI(strings.SplitN(m.list.View(), "\n", 2)[0])
+		if len([]rune(header)) != len([]rune(row)) {
+			t.Errorf("w=%d: header is %d cells, row is %d: %q vs %q",
+				w, len([]rune(header)), len([]rune(row)), header, row)
+		}
+
+		c := columnsFor(w)
+		if got, want := strings.Index(header, "status"), c.prefix+c.glyph; got != want {
+			t.Errorf("w=%d: status label at %d, state cell starts at %d", w, got, want)
+		}
+		// "finished" is right-aligned in its cell, as the timestamps under it are.
+		if got, want := strings.Index(header, "finished")+len("finished"),
+			len([]rune(header))-c.count; got != want {
+			t.Errorf("w=%d: finished label ends at %d, its cell ends at %d", w, got, want)
+		}
+	}
+}
+
 // The one-line help bar is cut off at its right-hand end, which is where q quit
 // sits, so adding one more key can silently push quit off an 80-column terminal.
 func TestShortHelpFitsAnEightyColumnTerminal(t *testing.T) {
