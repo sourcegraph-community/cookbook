@@ -19,7 +19,7 @@ The default invocation collects and analyzes. Status goes to stderr, the Markdow
 ## Commands and flags
 
 ```sh
-node todo_debt_radar.ts collect --raw-dir raw --poll 5 --timeout 1800
+node todo_debt_radar.ts collect --raw-dir raw --count 5 --poll 5 --timeout 1800
 node todo_debt_radar.ts analyze --raw-dir raw --out debt.jsonl --top 25 --owner @backend > report.md
 ```
 
@@ -29,6 +29,7 @@ node todo_debt_radar.ts analyze --raw-dir raw --out debt.jsonl --top 25 --owner 
 | `--out` | `todo-debt.jsonl` | Full enriched JSONL output. |
 | `--top` | `20` | Number of highest scores retained for the report and unowned section. |
 | `--owner` | none | Include only records with this exact owner; leading `@` is optional. |
+| `--count` | `all` | Search result limit for both collection jobs; use a positive integer for faster test runs. |
 | `--poll` | `5` seconds | Collection polling interval. |
 | `--timeout` | `1800` seconds | Per-job timeout. |
 
@@ -44,6 +45,8 @@ context:global patterntype:regexp file:^(CODEOWNERS|\.github/CODEOWNERS|docs/COD
 The block displays regex backslashes escaped; each doubled backslash is submitted as one.
 
 `count:all` retains all matches rather than normal ranked-search limits. This is essential both for a complete debt inventory and for reconstructing every nonempty CODEOWNERS line. The first RE2 expression requires a comment prefix and only horizontal whitespace before the marker. The second produces one match per nonempty line in the three conventional CODEOWNERS locations.
+
+For a quicker test, `--count 5` changes both queries to `count:5`. A limited CODEOWNERS job may omit rules for some debt matches, so limited runs can report paths as unowned that a complete run would assign.
 
 Collection creates and polls jobs at `/api/searchjobs.v1.Service/{CreateSearchJob,GetSearchJob}`, then streams each `resultsUrl` to disk. Raw JSONL is deliberately the stable on-disk handoff: archive it or repeatedly analyze it offline without rerunning searches.
 

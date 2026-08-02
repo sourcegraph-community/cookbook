@@ -15,6 +15,13 @@ type Pos = { line: number; column: number; offset?: number };
 export const SEARCH_QUERIES = [DEBT_QUERY, OWNERS_QUERY]
   .map(query => query.replaceAll("\\\\", "\\"))
   .map(query => query.replace(String.raw`\s*`, String.raw`[ \t]*`).replace(" . count:all", " .+ count:all"));
+
+export function queriesForCount(value: string): string[] {
+  const count = value.toLowerCase();
+  if (count !== "all" && !/^[1-9]\d*$/.test(count)) throw new Error("--count must be 'all' or a positive integer");
+  return SEARCH_QUERIES.map(query => query.replace(/count:all$/, `count:${count}`));
+}
+
 type Range = { start: Pos; end: Pos };
 type Chunk = { content: string; contentStart: Pos; ranges: Range[]; bestLineMatch?: number };
 type Content = { type: "content"; repository: string; path: string; commit?: string; chunkMatches: Chunk[] };
@@ -22,7 +29,13 @@ export type OwnerRule = { pattern: string; owners: string[]; line: number; prefi
 export type Score = { marker: number; path: number; age: number; ticketEra: number; total: number };
 export type Debt = { repository: string; path: string; commit?: string; line: number; column: number; text: string; marker: string; author?: string; tickets: string[]; pathClass: string; owners: string[]; url: string; score: Score };
 
-const value = (args: string[], name: string, fallback: string) => { const i = args.indexOf(name); return i < 0 ? fallback : (args[i + 1] ?? fallback); };
+const value = (args: string[], name: string, fallback: string) => {
+  const i = args.indexOf(name);
+  if (i < 0) return fallback;
+  const result = args[i + 1];
+  if (result === undefined || result.startsWith("--")) throw new Error(`missing value for ${name}`);
+  return result;
+};
 const normalizeOwner = (s: string) => s.replace(/^@/, "").toLowerCase();
 const DEFAULT_ENDPOINT = (process.env.SRC_ENDPOINT ?? "https://demo.sourcegraph.com").replace(/\/$/, "");
 const positiveNumber = (value: string, flag: string) => {
@@ -176,12 +189,13 @@ export async function analyze(rawDir: string, outPath: string, topN: number, own
 }
 
 type Job = { name: string; state: string; resultsUrl?: string; logsUrl?: string };
-async function collect(rawDir: string, pollMs: number, timeoutMs: number) {
+async function collect(rawDir: string, pollMs: number, timeoutMs: number, count: string) {
+  const queries = queriesForCount(count);
   const endpoint = DEFAULT_ENDPOINT, token = process.env.SRC_ACCESS_TOKEN;
   if (!token) throw new Error("SRC_ACCESS_TOKEN is not set (externalapi:read and externalapi:write required)");
   await mkdir(rawDir, { recursive: true }); const headers = { Authorization: `token ${token}` };
   const rpc = async (method: string, body: unknown) => { const r = await fetch(`${endpoint}/api/searchjobs.v1.Service/${method}`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) }); if (!r.ok) throw new Error(`${method}: HTTP ${r.status}: ${await r.text()}`); return await r.json() as Job; };
-  for (const [name, query] of [["debt", SEARCH_QUERIES[0]], ["codeowners", SEARCH_QUERIES[1]]]) {
+  for (const [name, query] of [["debt", queries[0]], ["codeowners", queries[1]]]) {
     let job = await rpc("CreateSearchJob", { parent: "users/-", searchJob: { query } }); console.error(`created ${name}: ${job.name}`); const deadline = Date.now() + timeoutMs;
     while (job.state !== "STATE_COMPLETED") { if (["STATE_FAILED", "STATE_CANCELED"].includes(job.state)) throw new Error(`${name} ended ${job.state} (${job.logsUrl ?? "no logs URL"})`); if (Date.now() > deadline) throw new Error(`${name} timed out`); await new Promise(r => setTimeout(r, pollMs)); job = await rpc("GetSearchJob", { name: job.name }); console.error(`  ${name}: ${job.state}`); }
     if (!job.resultsUrl) throw new Error(`${name} completed without resultsUrl`); const response = await fetch(new URL(job.resultsUrl, endpoint + "/"), { headers }); if (!response.ok || !response.body) throw new Error(`${name} download failed: HTTP ${response.status}`);
@@ -193,7 +207,7 @@ async function main() {
   const args = process.argv.slice(2), phase = !args[0] || args[0].startsWith("--") ? "all" : args.shift()!;
   if (!["all", "collect", "analyze"].includes(phase)) throw new Error("usage: todo_debt_radar.ts [collect|analyze] [flags]");
   const raw = value(args, "--raw-dir", "todo-debt-raw"), out = value(args, "--out", "todo-debt.jsonl"), top = positiveNumber(value(args, "--top", "20"), "--top");
-  if (phase !== "analyze") await collect(raw, positiveNumber(value(args, "--poll", "5"), "--poll") * 1000, positiveNumber(value(args, "--timeout", "1800"), "--timeout") * 1000);
+  if (phase !== "analyze") await collect(raw, positiveNumber(value(args, "--poll", "5"), "--poll") * 1000, positiveNumber(value(args, "--timeout", "1800"), "--timeout") * 1000, value(args, "--count", "all"));
   if (phase !== "collect") process.stdout.write(await analyze(raw, out, top, value(args, "--owner", "") || undefined));
 }
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) main().catch(e => { console.error(e instanceof Error ? e.message : e); process.exitCode = 1; });

@@ -3,13 +3,20 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { analyze, classifyPath, extractMarkers, ownersFor, parseCodeowners, scoreDebt, SEARCH_QUERIES } from "./todo_debt_radar.ts";
+import { analyze, classifyPath, extractMarkers, ownersFor, parseCodeowners, queriesForCount, scoreDebt, SEARCH_QUERIES } from "./todo_debt_radar.ts";
 
 test("collection submits count:all queries with single RE2 escapes", () => {
   assert.ok(SEARCH_QUERIES.every(query => query.endsWith("count:all")));
   assert.match(SEARCH_QUERIES[0], /\[ \\t\]\*.*\\b count:all$/);
   assert.ok(!SEARCH_QUERIES[0].includes(String.raw`\s`));
   assert.match(SEARCH_QUERIES[1], / \.\+ count:all$/);
+});
+
+test("collection count can be limited or left exhaustive", () => {
+  assert.ok(queriesForCount("5").every(query => query.endsWith("count:5")));
+  assert.ok(queriesForCount("ALL").every(query => query.endsWith("count:all")));
+  assert.throws(() => queriesForCount("0"), /positive integer/);
+  assert.throws(() => queriesForCount("5.5"), /positive integer/);
 });
 
 test("extracts marker metadata but not ticket as author", () => {
