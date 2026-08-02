@@ -72,6 +72,7 @@ type jobEntry struct {
 	job       *SearchJob
 	createdAt time.Time
 	endedAt   time.Time
+	deleting  bool
 	outPath   string
 	stats     *DownloadStats
 	logPath   string
@@ -668,6 +669,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "canceled " + path.Base(msg.name)
 
 	case deleteDoneMsg:
+		if e := m.find(msg.name); e != nil {
+			e.deleting = false
+		}
 		switch {
 		case msg.err == nil:
 			m.status = "deleted " + path.Base(msg.name)
@@ -796,9 +800,11 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.status = "kept " + path.Base(name)
 			return m, nil
 		}
-		if m.find(name) == nil {
+		e := m.find(name)
+		if e == nil {
 			return m, nil
 		}
+		e.deleting = true
 		m.status = "deleting " + path.Base(name) + "…"
 		return m, deleteJobCmd(m.client, name)
 	}

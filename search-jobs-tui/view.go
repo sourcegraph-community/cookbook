@@ -152,8 +152,14 @@ func (d jobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 	if e.job != nil {
 		state, query = e.job.State, e.job.Query
 	}
+	stateLabel := PrettyState(state)
+	glyphState := state
+	if e.deleting {
+		glyphState = StateProcessing
+		stateLabel = "Deleting"
+	}
 
-	glyph, glyphStyle := stateGlyph(state, d.spin)
+	glyph, glyphStyle := stateGlyph(glyphState, d.spin)
 
 	// Right-hand cells are fixed width so they line up under their labels; the
 	// query takes whatever is left.
@@ -167,7 +173,7 @@ func (d jobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 	line := fmt.Sprintf("%s%s %s%s%s",
 		prefix,
 		glyphStyle.Render(glyph),
-		pad(PrettyState(state), c.state),
+		pad(stateLabel, c.state),
 		pad(query, c.query),
 		padLeft(fmtWhen(e, state, c.withDate), c.when),
 	)

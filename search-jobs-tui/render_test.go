@@ -244,6 +244,11 @@ func TestDeleteAsksFirst(t *testing.T) {
 	if !strings.Contains(m.status, "deleting 145") {
 		t.Errorf("status = %q, want it to say the delete is in flight", m.status)
 	}
+	m.list.SetDelegate(jobDelegate{spin: "⠋"})
+	row := stripANSI(strings.SplitN(m.list.View(), "\n", 2)[0])
+	if !strings.Contains(row, "⠋ Deleting") {
+		t.Errorf("row = %q, want deleting state and spinner", row)
+	}
 
 	// A running job is worth flagging: the prompt is the last chance to notice.
 	m = testModel(80, 24, jobs...)
@@ -313,6 +318,9 @@ func TestDeleteReplyHandling(t *testing.T) {
 		}
 		if !strings.Contains(m.status, tc.wantStatus) {
 			t.Errorf("%s: status = %q, want it to contain %q", tc.name, m.status, tc.wantStatus)
+		}
+		if tc.wantJobs == 2 && m.jobs[0].deleting {
+			t.Errorf("%s: row remained in deleting state after reply", tc.name)
 		}
 	}
 
