@@ -20,6 +20,9 @@ func testModel(w, h int, jobs ...*SearchJob) model {
 	return m
 }
 
+// Every mode has to draw exactly the window, not just the list. Checking only
+// modeList is how the help screen came to render three rows too many: its footer
+// grew to four rows and the chrome budget still said one.
 func TestRenderFillsExactlyTheWindow(t *testing.T) {
 	cases := []struct{ w, h int }{{80, 24}, {40, 24}, {200, 60}, {40, 12}}
 	jobs := []*SearchJob{
@@ -27,13 +30,36 @@ func TestRenderFillsExactlyTheWindow(t *testing.T) {
 		{Name: "users/a/searchJobs/2", Query: "panic( lang:go", State: StateCompleted, ResultsURL: "/x"},
 		{Name: "users/a/searchJobs/3", Query: ".* count:all", State: StateFailed, LogsURL: "/logs"},
 	}
+	// The key that opens each mode, pressed from the list. An empty list has
+	// nothing to delete, so modeConfirm is only reachable in the three-job case;
+	// enterMode checks it landed rather than assuming.
+	modes := []struct {
+		name string
+		key  tea.KeyPressMsg
+		want mode
+	}{
+		{"list", tea.KeyPressMsg{}, modeList},
+		{"input", tea.KeyPressMsg{Code: 'n', Text: "n"}, modeInput},
+		{"help", tea.KeyPressMsg{Code: '?', Text: "?"}, modeHelp},
+		{"confirm", tea.KeyPressMsg{Code: 'x', Text: "x"}, modeConfirm},
+	}
+
 	for _, tc := range cases {
 		for _, n := range []int{0, 3} {
-			m := testModel(tc.w, tc.h, jobs[:n]...)
-			out := m.render()
-			got := strings.Count(out, "\n") + 1
-			if got != tc.h {
-				t.Errorf("w=%d h=%d jobs=%d: rendered %d lines, want %d", tc.w, tc.h, n, got, tc.h)
+			for _, md := range modes {
+				m := testModel(tc.w, tc.h, jobs[:n]...)
+				if md.want != modeList {
+					next, _ := m.handleKey(md.key)
+					m = next.(model)
+					if m.mode != md.want {
+						continue
+					}
+				}
+				got := strings.Count(m.render(), "\n") + 1
+				if got != tc.h {
+					t.Errorf("%s w=%d h=%d jobs=%d: rendered %d lines, want %d",
+						md.name, tc.w, tc.h, n, got, tc.h)
+				}
 			}
 		}
 	}
@@ -156,25 +182,197 @@ func TestShortHelpFitsAnEightyColumnTerminal(t *testing.T) {
 	}
 }
 
-// The full help pane replaces a one-line footer, so its height is what decides
-// whether the frame still fits. Four rows is the budget; a fifth column is free.
-func TestFullHelpStaysFourRows(t *testing.T) {
+// The help screen's own footer is truncated at the right like any other, and the
+// one thing it cannot lose is how to get out.
+func TestHelpFooterSurvivesFortyColumns(t *testing.T) {
+	m := testModel(40, 24)
+	bar := stripANSI(m.help.ShortHelpView(m.keys.HelpModeHelp()))
+	if n := len([]rune(bar)); n > 40 {
+		t.Errorf("help footer is %d cells: %q", n, bar)
+	}
+	if !strings.Contains(bar, "close") {
+		t.Errorf("help footer does not say how to close: %q", bar)
+	}
+}
+
+// The help screen is the only place several keys are written down at all, so a
+// key that stops appearing here stops being discoverable.
+func TestHelpDocumentsEveryActionKey(t *testing.T) {
 	m := testModel(80, 24)
-	pane := stripANSI(m.help.FullHelpView(m.keys.FullHelp()))
-	if rows := strings.Count(pane, "\n") + 1; rows > 4 {
-		t.Errorf("full help is %d rows:\n%s", rows, pane)
-	}
-	for i, line := range strings.Split(pane, "\n") {
-		if n := len([]rune(line)); n > 80 {
-			t.Errorf("full help line %d is %d cells: %q", i, n, line)
+	text := stripANSI(m.helpText(80))
+
+	for _, s := range m.helpSections() {
+		for _, e := range s.entries {
+			if !strings.Contains(text, e.label()) {
+				t.Errorf("help text is missing the %q row", e.label())
+			}
 		}
 	}
-	// Every key the list acts on has to appear here, since this is the only place
-	// the ones missing from the one-line bar are documented.
-	for _, want := range []string{"delete this job", "open in browser", "rerun this query"} {
-		if !strings.Contains(pane, want) {
-			t.Errorf("full help does not mention %q:\n%s", want, pane)
+
+	// The paging keys come from the list's keymap and were documented nowhere.
+	for _, want := range []string{"pgup", "pgdn", "g home", "G end"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("help text does not mention %q", want)
 		}
+	}
+
+	// c means two things. Both have to be spelled out, each with its condition,
+	// or the row that does not apply reads as the one that does.
+	for _, want := range []string{"while a transfer is running", "with no transfer running"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("help text does not distinguish the two meanings of c: missing %q", want)
+		}
+	}
+
+	// The list binds l to next page and d to half a page down, but neither ever
+	// reaches it: the log and download keys are matched first. Offering them as
+	// paging keys would document a shadow.
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.Contains(line, "page") && !strings.Contains(line, "job") {
+			continue
+		}
+		for _, shadowed := range []string{"→/l", "/l ", "pgdn f d", " d "} {
+			if strings.Contains(line, "next page") && strings.Contains(line, shadowed) {
+				t.Errorf("help offers the shadowed key %q for paging: %q", shadowed, line)
+			}
+		}
+	}
+}
+
+// Three things the dashboard knows and never shows: where it is pointed, where
+// downloads land, and which of these keys this instance actually implements.
+func TestHelpReportsThisSession(t *testing.T) {
+	m := testModel(80, 24)
+	text := stripANSI(m.helpText(80))
+	for _, want := range []string{m.client.Endpoint, "searchjob-<id>.jsonl", "SRC_ACCESS_TOKEN", "every 5s"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("help text does not report %q", want)
+		}
+	}
+	// An empty store path means this run forgets its jobs on exit, which is worth
+	// saying rather than printing as a blank.
+	if !strings.Contains(text, "does not remember jobs") {
+		t.Error("help text does not say the job cache is off")
+	}
+
+	m.canStop, m.canDelete = false, false
+	if n := strings.Count(stripANSI(m.helpText(80)), "not supported by this instance"); n != 2 {
+		t.Errorf("unsupported instance: %d rows say so, want 2", n)
+	}
+	// Read from the sections rather than the rendered body: the sentence is long
+	// enough that wrapping puts a newline through the middle of it.
+	var descs strings.Builder
+	for _, s := range m.helpSections() {
+		for _, e := range s.entries {
+			descs.WriteString(e.desc + "\n")
+		}
+	}
+	for _, want := range []string{"does not support canceling jobs", "does not support deleting jobs"} {
+		if !strings.Contains(descs.String(), want) {
+			t.Errorf("help does not explain %q on an instance that lacks it", want)
+		}
+	}
+}
+
+// The hanging indent under a key is arithmetic, and the viewport would hide a
+// mistake in it by cutting the line to width.
+func TestHelpWrapsWithoutOverflowing(t *testing.T) {
+	m := testModel(80, 24)
+	for _, w := range []int{40, 60, 80, 200} {
+		for i, line := range strings.Split(m.helpText(w), "\n") {
+			if n := len([]rune(stripANSI(line))); n > w {
+				t.Errorf("w=%d: help line %d is %d cells: %q", w, i, n, stripANSI(line))
+			}
+		}
+	}
+}
+
+// Help used to close on any key, which is what made it unscrollable. Only the
+// three keys that mean "out" close it now; everything else moves the text.
+func TestHelpScrollsInsteadOfClosing(t *testing.T) {
+	open := func() model {
+		m := testModel(40, 12)
+		next, _ := m.handleKey(tea.KeyPressMsg{Code: '?', Text: "?"})
+		return next.(model)
+	}
+
+	base := open()
+	if base.mode != modeHelp {
+		t.Fatalf("? left mode = %v, want modeHelp", base.mode)
+	}
+	first := stripANSI(base.render())
+
+	for _, k := range []tea.KeyPressMsg{
+		{Code: 'j', Text: "j"},
+		{Code: tea.KeyPgDown},
+		// No Text on a modified key: Key.String reports Text when it is set, so
+		// "d" would arrive as a plain d.
+		{Code: 'd', Mod: tea.ModCtrl},
+	} {
+		next, _ := open().handleKey(k)
+		m := next.(model)
+		if m.mode != modeHelp {
+			t.Errorf("%v closed help", k)
+			continue
+		}
+		if stripANSI(m.render()) == first {
+			t.Errorf("%v did not scroll the help text", k)
+		}
+	}
+
+	// An unbound key is not an exit. Pressing one while reading should do
+	// nothing at all, not dismiss the text.
+	next, _ := open().handleKey(tea.KeyPressMsg{Code: 'z', Text: "z"})
+	if m := next.(model); m.mode != modeHelp {
+		t.Error("an unbound key closed help")
+	} else if stripANSI(m.render()) != first {
+		t.Error("an unbound key scrolled the help text")
+	}
+
+	for _, k := range []tea.KeyPressMsg{
+		{Code: '?', Text: "?"},
+		{Code: tea.KeyEscape},
+		{Code: 'q', Text: "q"},
+	} {
+		next, _ := open().handleKey(k)
+		if m := next.(model); m.mode != modeList {
+			t.Errorf("%v left mode = %v, want modeList", k, m.mode)
+		}
+	}
+}
+
+// q closes the help screen rather than the program, so ctrl+c is the only way
+// out from here — and it still owes an in-flight download its cleanup.
+func TestForceQuitFromHelpStopsDownloads(t *testing.T) {
+	jobs := []*SearchJob{{Name: "users/a/searchJobs/1", Query: "TODO", State: StateProcessing}}
+	m := testModel(80, 24, jobs...)
+
+	canceled := false
+	m.jobs[0].dl = &download{cancel: func() { canceled = true }}
+
+	next, _ := m.handleKey(tea.KeyPressMsg{Code: '?', Text: "?"})
+	m = next.(model)
+	_, cmd := m.handleKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("ctrl+c in help issued no command, want quit")
+	}
+	if !canceled {
+		t.Error("ctrl+c in help quit without canceling the download")
+	}
+}
+
+// esc used to reach the list, which answered it with tea.Quit — skipping the
+// download cleanup and taking the dashboard down on a key that means "back"
+// everywhere else.
+func TestEscapeDoesNotQuitTheJobList(t *testing.T) {
+	jobs := []*SearchJob{{Name: "users/a/searchJobs/1", Query: "TODO", State: StateProcessing}}
+	m := testModel(80, 24, jobs...)
+	next, cmd := m.handleKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if got := next.(model).mode; got != modeList {
+		t.Errorf("esc left mode = %v, want modeList", got)
+	}
+	if cmd != nil {
+		t.Error("esc in the job list issued a command, want nothing")
 	}
 }
 

@@ -199,6 +199,12 @@ func (m *model) layout() {
 	m.list.SetSize(m.width, h)
 	m.input.SetWidth(max(20, m.width-8))
 	m.help.SetWidth(m.width)
+
+	// The help text is wrapped to the window, so a resize rewrites it rather
+	// than reflowing what is already there.
+	m.helpVP.SetWidth(m.width)
+	m.helpVP.SetHeight(max(1, m.height-helpChromeHeight))
+	m.helpVP.SetContent(m.helpText(m.width))
 }
 
 // --- view -------------------------------------------------------------------
@@ -214,6 +220,12 @@ func (m model) render() string {
 		return "starting…"
 	}
 
+	// Help takes the whole window. It has more to say than a pane holds, and it
+	// is the one screen nothing behind it needs to stay visible for.
+	if m.mode == modeHelp {
+		return clampWidth(m.renderHelp(), m.width)
+	}
+
 	var b strings.Builder
 
 	// Header: title on the left, instance on the right.
@@ -226,7 +238,8 @@ func (m model) render() string {
 	if m.mode == modeInput {
 		b.WriteString(m.input.View())
 	} else {
-		b.WriteString(styleDim.Render("query> press n to run a new search"))
+		b.WriteString(styleDim.Render(fmt.Sprintf(
+			"query> press %s to run a new search", m.keys.New.Help().Key)))
 	}
 	b.WriteString("\n\n")
 
@@ -237,7 +250,8 @@ func (m model) render() string {
 	b.WriteString("\n")
 
 	if len(m.jobs) == 0 {
-		b.WriteString(styleDim.Render("  no jobs yet — press n to create one"))
+		b.WriteString(styleDim.Render(fmt.Sprintf(
+			"  no jobs yet — press %s to create one", m.keys.New.Help().Key)))
 		// Pad to the same height the list would have occupied, so the panes
 		// below it do not move when the first job appears.
 		b.WriteString(strings.Repeat("\n", max(2, m.height-chromeHeight+1)))
@@ -252,23 +266,17 @@ func (m model) render() string {
 
 	// Status line. The delete prompt takes this row rather than a pane of its own,
 	// so asking the question does not change the height of the frame.
-	switch m.mode {
-	case modeConfirm:
+	if m.mode == modeConfirm {
 		b.WriteString(m.renderConfirm())
-	case modeHelp:
-		b.WriteString(styleDim.Render(truncate("press any key to close help", m.width)))
-	default:
+	} else {
 		b.WriteString(styleDim.Render(truncate(m.status, m.width)))
 	}
 	b.WriteString("\n")
 
 	// Footer.
-	switch m.mode {
-	case modeHelp:
-		b.WriteString(m.help.FullHelpView(m.keys.FullHelp()))
-	case modeConfirm:
+	if m.mode == modeConfirm {
 		b.WriteString(m.help.ShortHelpView(m.keys.ConfirmHelp()))
-	default:
+	} else {
 		b.WriteString(m.help.ShortHelpView(m.keys.ShortHelp()))
 	}
 
@@ -311,11 +319,13 @@ func (m model) renderDetail() string {
 	case e.err != nil:
 		second = styleRed.Render(truncate(e.err.Error(), m.width))
 	case e.job.State == StateCompleted:
-		second = styleDim.Render("press d to download results, l for logs")
+		second = styleDim.Render(fmt.Sprintf("press %s to download results, %s for logs",
+			m.keys.Download.Help().Key, m.keys.Logs.Help().Key))
 	case e.job.State == StateFailed:
 		// Failed is where the log actually matters: it is the only explanation
 		// the API ever gives for a rejected query.
-		second = styleDim.Render("press l to download the logs")
+		second = styleDim.Render(fmt.Sprintf("press %s to download the logs",
+			m.keys.Logs.Help().Key))
 	case !IsTerminal(e.job.State):
 		// MiniDot frames carry no trailing space, unlike Dot, so the gap is
 		// spelled out here.

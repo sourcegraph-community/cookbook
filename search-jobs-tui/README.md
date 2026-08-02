@@ -15,6 +15,7 @@ This recipe watches many jobs at once. It polls each unfinished job independentl
 | `api.go` | The whole HTTP surface. Read this one if you want the API, not the terminal UI. It imports nothing from Bubble Tea. |
 | `model.go` | State and the update loop: polling fan-out, download progress, key handling. |
 | `view.go` | Rendering and layout. |
+| `help.go` | The help screen: every key as data, plus what this run is pointed at. |
 | `main.go` | Flags, environment, startup. |
 | `store.go` | Remembers job names between runs. |
 | `render_test.go` | Layout tests. They need no token and no network. |
@@ -45,6 +46,8 @@ go run .
 
 Press `n`, type a query, press enter. Repeat for as many queries as you want to run. Press `d` on a completed job to download its results, or `l` for its log. Press `x` to delete a job you are done with, and `y` to confirm.
 
+Press `?` for the help screen: every key with what it does, and what this run is pointed at: endpoint, where downloads land, the job cache, and whether this instance supports canceling and deleting.
+
 Start with a query already running:
 
 ```sh
@@ -62,17 +65,21 @@ go build -o search-jobs-tui .
 | Key | What it does |
 | --- | --- |
 | `j` `k` `↑` `↓` | Move the selection |
+| `h` `←` `pgup` `b` `u` | Previous page, when there are more jobs than rows for them |
+| `pgdn` `→` `f` | Next page |
+| `g` `home` / `G` `end` | First job / last job |
 | `n` | New query |
 | `cmd-v` `ctrl-v` | Paste a query. Works from the list too, which opens the query box |
 | `enter` | Submit the query |
-| `esc` | Leave the query box |
+| `esc` | Leave the query box, the delete prompt, or the help screen. Does nothing in the list |
 | `r` | Rerun the selected job's query as a new job, as the web UI's rerun does |
 | `d` | Download the selected completed job's results |
 | `l` | Download the selected job's log |
-| `c` | Cancel the selected running job, or an in-flight download |
+| `c` | Cancel the in-flight download, if there is one |
+| `c` | With no download running, cancel the selected running job |
 | `x` | Delete the selected job, after a `y`/`n` confirmation |
 | `o` | Open the Search Jobs page in a browser |
-| `?` | Full key list |
+| `?` | Help screen. Scrolls; `?`, `esc`, or `q` closes it |
 | `q` `ctrl-c` | Quit |
 
 ## Flags
@@ -96,13 +103,13 @@ The same three calls as the [search-jobs-api](../search-jobs-api/) recipe, plus 
 6. `POST /api/searchjobs.v1.Service/CancelSearchJob` stops a running job.
 7. `POST /api/searchjobs.v1.Service/DeleteSearchJob` removes a job and its stored results. Needs `externalapi:write`.
 
-The last three are best-effort. An instance that does not implement them returns an error that `Unsupported` in `api.go` recognizes, and the dashboard quietly does without: it falls back to a local cache of job names for the list, and it hides the cancel and delete actions. Check your instance's own reference at `$SRC_ENDPOINT/api-reference` for what it actually supports.
+The last three are best-effort. An instance that does not implement them returns an error that `Unsupported` in `api.go` recognizes, and the dashboard quietly does without: it falls back to a local cache of job names for the list, and pressing cancel or delete says the instance does not support it rather than failing. The help screen reports which of the two this instance has. Check your instance's own reference at `$SRC_ENDPOINT/api-reference` for what it actually supports.
 
 Cancel and delete are not the same thing. Cancel stops the work and leaves the record, so a canceled job still sits in the list with whatever results it had reached. Delete takes the record and the stored results away and cannot be undone, which is why `x` asks before sending anything. Files already written to `--out-dir` are local copies and are left alone.
 
 The log is a CSV, one row per repository and revision the job touched, with a status and a failure message for each. It is the only explanation a rejected query ever gets, and it is worth reading on a job that succeeded too: that is where partial coverage shows up. `l` fetches it for any job that has started. An instance that sends no `logsUrl` falls back to `/.api/search/export/<id>.log`, which is what the web UI's own "View logs" button requests, built from the numeric id already in the job record. That path is the internal API, so a token needs the broader `user:all` scope to use it; `logsUrl` needs only `externalapi:read`, which is why it is preferred.
 
-Five things needed more than the framework gives you.
+Six things needed more than the framework gives you.
 
 **Animating a list row.** A `list.ItemDelegate` renders rows without access to the model, so it cannot read the spinner. The update loop pushes the current frame into the delegate with `SetDelegate` on every tick. `MiniDot` is the spinner because its frames are one cell wide: the marker sits in a fixed-width column, so a wider frame would shift every column to its right, and only while a job is running. A test walks every frame and checks the row width holds.
 
@@ -118,6 +125,10 @@ The row stays until the server confirms the job is gone. Two of those replies ar
 
 Results stream straight to disk and are never held in memory, so a multi-gigabyte result set is fine. Canceling a download deletes the partial file rather than leaving something that looks like a complete result set.
 
+**A help screen worth opening.** The bubbles `help` component renders a keymap, which is the easy half. It cannot say that `c` means two different things depending on whether a transfer is running, that the list contributes paging keys this file never wrote, or that `c` does nothing at all on an instance without `CancelSearchJob`. So the help text is a table of sections in `help.go`, each row holding the `key.Binding` it documents, so the label comes from the binding and a rebind moves the text with it, plus a `keys` override for the rows describing someone else's keymap. The list binds `l` to next page and `d` to half a page down, but neither ever reaches it, because the log and download keys are matched first; printing the component's own labels would document a shadow.
+
+That is more text than a footer holds, so help is a full screen with a `viewport` for a body. Not an overlay: lipgloss v2 ships a `Compositor`, but it sizes itself from the longest line of each layer, and this layout's whole contract is that a frame is exactly as tall and wide as the window. The viewport keeps that contract for free, padding to exactly the height it is given, which is stronger than the main view's fixed `chromeHeight` budget. That budget is what let the old help pane render three rows too many for as long as no test looked. Now every mode is checked. Since the screen scrolls, only `?`, `esc`, and `q` close it and everything else moves the text; `ctrl+c` still quits, and still cancels downloads on the way out.
+
 ## Testing
 
 The layout tests run without a token or a network connection:
@@ -126,7 +137,7 @@ The layout tests run without a token or a network connection:
 go test ./...
 ```
 
-They pin the things that break quietly: every frame fills the window exactly, no line exceeds the terminal width, job rows stay aligned whether or not they are selected, and `x` never deletes anything without an answer.
+They pin the things that break quietly: every frame fills the window exactly in every mode, no line exceeds the terminal width, job rows stay aligned whether or not they are selected, `x` never deletes anything without an answer, and `esc` does not quit.
 
 ## Troubleshooting
 

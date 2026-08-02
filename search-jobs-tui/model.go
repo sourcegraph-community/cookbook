@@ -28,6 +28,7 @@ import (
 	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -185,6 +186,14 @@ type keyMap struct {
 	Escape   key.Binding
 	Confirm  key.Binding
 	Deny     key.Binding
+	// ForceQuit is matched inside the help screen, where q closes the screen
+	// rather than the program. Elsewhere Quit already covers ctrl+c.
+	ForceQuit key.Binding
+	CloseHelp key.Binding
+	// Scroll and Page are the help screen's footer labels. The viewport owns the
+	// keys themselves; these two only say so, the way Deny does.
+	Scroll key.Binding
+	Page   key.Binding
 }
 
 func defaultKeys() keyMap {
@@ -211,6 +220,11 @@ func defaultKeys() keyMap {
 		// out, so the listed n is one way to say no rather than the way.
 		Confirm: key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "delete it")),
 		Deny:    key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n/esc", "keep it")),
+
+		ForceQuit: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
+		CloseHelp: key.NewBinding(key.WithKeys("?", "esc", "q"), key.WithHelp("?/esc/q", "close")),
+		Scroll:    key.NewBinding(key.WithKeys("up", "down", "k", "j"), key.WithHelp("↑/↓", "scroll")),
+		Page:      key.NewBinding(key.WithKeys("pgup", "pgdown", "b", "f"), key.WithHelp("pgup/pgdn", "page")),
 	}
 }
 
@@ -221,19 +235,14 @@ func (k keyMap) ShortHelp() []key.Binding {
 	return []key.Binding{k.New, k.Rerun, k.Download, k.Logs, k.Cancel, k.Delete, k.Help, k.Quit}
 }
 
-// FullHelp is four columns, none taller than four rows, which is what keeps the
-// help pane the same height as the footer it replaces.
-func (k keyMap) FullHelp() [][]key.Binding {
-	rerun := key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rerun this query"))
-	logs := key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "log download"))
-	del := key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete this job"))
-	open := key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in browser"))
-	return [][]key.Binding{
-		{k.Up, k.Down, k.New, k.Submit},
-		{k.Download, logs, rerun},
-		{k.Cancel, del, open},
-		{k.Help, k.Escape, k.Quit},
-	}
+// HelpModeHelp is the footer while the help screen is open.
+//
+// CloseHelp goes first because the bar is cut off at its right-hand end on a
+// narrow terminal, and how to get out is the one thing that has to survive the
+// cut. There is no FullHelp: the four-column grid it fed said too little to be
+// worth a mode of its own, and helpSections replaced it.
+func (k keyMap) HelpModeHelp() []key.Binding {
+	return []key.Binding{k.CloseHelp, k.Scroll, k.Page, k.ForceQuit}
 }
 
 // ConfirmHelp replaces the footer while a delete is waiting on an answer.
@@ -257,7 +266,10 @@ type model struct {
 	progress progress.Model
 	spinner  spinner.Model
 	help     help.Model
-	keys     keyMap
+	// The help screen's body. It scrolls, so the text can say more than a
+	// terminal is tall.
+	helpVP viewport.Model
+	keys   keyMap
 
 	mode   mode
 	status string
@@ -283,6 +295,10 @@ func newModel(c *Client, outDir, storePath string, pollEvery time.Duration, init
 	l.SetShowHelp(false)
 	l.SetShowPagination(false)
 	l.SetFilteringEnabled(false)
+	// The list answers both q and esc with tea.Quit. q never reaches it, because
+	// handleKey matches Quit first, but esc did — and quitting that way skipped
+	// the download cleanup, leaving a half-written file behind.
+	l.DisableQuitKeybindings()
 
 	sp := spinner.New()
 	// One cell wide, unlike Dot, which pads a trailing space. The same frame
@@ -296,6 +312,14 @@ func newModel(c *Client, outDir, storePath string, pollEvery time.Duration, init
 	h.Styles.ShortKey = styleCyan
 	h.Styles.FullKey = styleCyan
 
+	// The help text is word-wrapped before it goes in, so the viewport's own
+	// wrapping is left off: it cuts mid-word. That also makes horizontal
+	// scrolling meaningless, and its keys are h and l, which the dashboard wants
+	// for other things.
+	vp := viewport.New()
+	vp.KeyMap.Left.SetEnabled(false)
+	vp.KeyMap.Right.SetEnabled(false)
+
 	m := model{
 		client:    c,
 		outDir:    outDir,
@@ -307,6 +331,7 @@ func newModel(c *Client, outDir, storePath string, pollEvery time.Duration, init
 		progress:  progress.New(progress.WithDefaultBlend(), progress.WithoutPercentage()),
 		spinner:   sp,
 		help:      h,
+		helpVP:    vp,
 		keys:      defaultKeys(),
 		mode:      modeList,
 		canStop:   true,
@@ -568,6 +593,20 @@ func (m *model) pollDue() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// cancelDownloads stops every transfer still in flight.
+//
+// Quitting has to do this, or the goroutine writing the file outlives the
+// program that started it and leaves a partial download looking like a whole
+// one. There are two ways out — q from the list, ctrl+c from anywhere — and
+// both go through here.
+func (m *model) cancelDownloads() {
+	for _, e := range m.jobs {
+		if e.dl != nil {
+			e.dl.cancel()
+		}
+	}
+}
+
 // --- update -----------------------------------------------------------------
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -787,8 +826,21 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case modeHelp:
-		m.mode = modeList
-		return m, nil
+		switch {
+		case key.Matches(msg, m.keys.ForceQuit):
+			// q closes the help screen, so ctrl+c is the only way out of the
+			// program from here, and it still owes the downloads their cleanup.
+			m.cancelDownloads()
+			return m, tea.Quit
+		case key.Matches(msg, m.keys.CloseHelp):
+			m.mode = modeList
+			return m, nil
+		}
+		// Anything else scrolls. A stray key must not dismiss the one screen that
+		// explains what the other keys do.
+		var cmd tea.Cmd
+		m.helpVP, cmd = m.helpVP.Update(msg)
+		return m, cmd
 
 	case modeConfirm:
 		// One question, two outcomes, and only y takes the destructive one. The
@@ -812,15 +864,16 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// modeList
 	switch {
 	case key.Matches(msg, m.keys.Quit):
-		for _, e := range m.jobs {
-			if e.dl != nil {
-				e.dl.cancel()
-			}
-		}
+		m.cancelDownloads()
 		return m, tea.Quit
 
 	case key.Matches(msg, m.keys.Help):
 		m.mode = modeHelp
+		// Rebuilt on the way in rather than only on resize: canStop and canDelete
+		// can have flipped since the last time the text was written, and they are
+		// two of the lines worth reading.
+		m.helpVP.SetContent(m.helpText(m.width))
+		m.helpVP.GotoTop()
 		return m, nil
 
 	case key.Matches(msg, m.keys.New):
@@ -905,6 +958,13 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Open):
 		// The web UI page, not the job's resultsUrl. See SearchJobsPageURL.
 		return m, openURLCmd(m.client.SearchJobsPageURL())
+
+	case key.Matches(msg, m.keys.Escape):
+		// esc backs out of the query box, the delete prompt, and the help screen.
+		// In the list there is nothing to back out of, so it does nothing — but
+		// it has to be claimed here, because otherwise it reaches the list, and
+		// the list answers esc with tea.Quit.
+		return m, nil
 	}
 
 	var cmd tea.Cmd
