@@ -2,6 +2,9 @@
 
 A terminal dashboard for Sourcegraph Search Jobs. Submit several queries, watch them all run at once, and download each result set when it finishes. Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
+<img width="2260" height="926" alt="CleanShot 2026-08-01 at 19 34 47@2x" src="https://github.com/user-attachments/assets/205593ba-b161-4b04-9efa-0f6b60493fc5" />
+
+
 Video: TODO
 
 ## What it does
