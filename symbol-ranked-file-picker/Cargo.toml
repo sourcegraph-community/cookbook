@@ -1,0 +1,21 @@
+[package]
+name = "file-suggestion"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nucleo-matcher = "0.3.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+ureq = { version = "3.2.1", features = ["json"] }
+
+# This binary is spawned fresh on every keystroke (spec: p95 < 15ms warm), so
+# process-startup cost is part of the latency budget, not just runtime work.
+# LTO + a single codegen unit + stripped symbols shrink the binary and its
+# load time; `opt-level = 3` is the default for `--release` but stated
+# explicitly since it matters here more than in a typical CLI.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,5 @@
+# The dependency tree needs a Cargo that understands edition 2024. Pinning the
+# channel here means `cargo build` picks the right toolchain for this directory
+# only, without touching your global default.
+[toolchain]
+channel = "stable"
