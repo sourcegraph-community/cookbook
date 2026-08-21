@@ -31,66 +31,95 @@ pub fn normalized_basename(path: &str) -> String {
     normalize(stem)
 }
 
-/// Split a basename into (normalized stem, lowercased extension). A
-/// leading-dot name (`.gitignore`) or an empty extension has no extension.
-fn basename_parts(file_name: &str) -> (String, Option<String>) {
+/// Split a trailing extension off a basename. A leading-dot name
+/// (`.gitignore`) or an empty extension has no extension part.
+fn split_ext(file_name: &str) -> (&str, Option<&str>) {
     match file_name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
-            (normalize(stem), Some(ext.to_lowercase()))
-        }
-        _ => (normalize(file_name), None),
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => (stem, Some(ext)),
+        _ => (file_name, None),
     }
 }
 
-/// True when `query` names this path's basename, for the §6.1 exact-match
-/// hoist. A query carrying an extension must match it, so `os.rs` hoists the
-/// files actually named `os.rs` and not `os.md` or `os.pyi`; a bare `os` still
-/// matches any extension, as it always did.
-///
-/// Queries are typed with the extension far more often than not, and every one
-/// of them used to miss the hoist entirely and fall through to fuzzy path
-/// scoring — `@os.rs` in monty returned `os_tests.rs` and `os_dispatch.rs`
-/// while the two real `os.rs` files sat below them.
-pub fn basename_matches(path: &str, query: &str) -> bool {
-    let file_name = path.rsplit('/').next().unwrap_or(path);
-    let (path_stem, path_ext) = basename_parts(file_name);
-    let (query_stem, query_ext) = basename_parts(query);
-    path_stem == query_stem && (query_ext.is_none() || query_ext == path_ext)
+/// A query prepared once for §6.1 basename matching. Built outside the
+/// per-candidate loop on purpose: this runs against every tracked file on
+/// every keystroke, so normalizing the query 1,100 times over would show up
+/// in the warm p95 the whole design is built around.
+pub struct BasenameQuery {
+    stem: String,
+    ext: Option<String>,
+}
+
+/// Prepare `query` for [`BasenameQuery::matches`].
+pub fn basename_query(query: &str) -> BasenameQuery {
+    let (stem, ext) = split_ext(query);
+    BasenameQuery {
+        stem: normalize(stem),
+        ext: ext.map(str::to_lowercase),
+    }
+}
+
+impl BasenameQuery {
+    /// True when the query names this path's basename, for the §6.1 hoist. A
+    /// query carrying an extension must match it, so `os.rs` hoists the files
+    /// actually named `os.rs` and not `os.md` or `os.pyi`; a bare `os` still
+    /// matches any extension, as it always did.
+    ///
+    /// Queries are typed with the extension more often than not, and every one
+    /// of them used to miss the hoist entirely and fall through to fuzzy path
+    /// scoring: `normalize("os.rs")` keeps its dot, `normalized_basename`
+    /// drops it, so the two could never be equal.
+    pub fn matches(&self, path: &str) -> bool {
+        let file_name = path.rsplit('/').next().unwrap_or(path);
+        let (stem, ext) = split_ext(file_name);
+        // Extension first: a byte compare that rejects most candidates before
+        // the stem normalization has to allocate anything.
+        if let Some(want) = &self.ext {
+            match ext {
+                Some(have) if have.eq_ignore_ascii_case(want) => {}
+                _ => return false,
+            }
+        }
+        normalize(stem) == self.stem
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::basename_matches;
+    use super::basename_query;
+
+    fn matches(path: &str, query: &str) -> bool {
+        basename_query(query).matches(path)
+    }
 
     #[test]
     fn query_with_extension_matches_only_that_extension() {
-        assert!(basename_matches("crates/monty-types/src/os.rs", "os.rs"));
-        assert!(basename_matches("crates/monty/src/modules/os.rs", "os.rs"));
-        assert!(!basename_matches("limitations/os.md", "os.rs"));
-        assert!(!basename_matches("crates/monty-typeshed/custom/os.pyi", "os.rs"));
+        assert!(matches("crates/monty-types/src/os.rs", "os.rs"));
+        assert!(matches("crates/monty/src/modules/os.rs", "os.rs"));
+        assert!(!matches("limitations/os.md", "os.rs"));
+        assert!(!matches("crates/monty-typeshed/custom/os.pyi", "os.rs"));
     }
 
     #[test]
     fn bare_query_still_matches_any_extension() {
-        assert!(basename_matches("crates/monty/src/value.rs", "value"));
-        assert!(basename_matches("crates/monty-js/ts/worker/value.ts", "value"));
-        assert!(basename_matches("limitations/os.md", "os"));
+        assert!(matches("crates/monty/src/value.rs", "value"));
+        assert!(matches("crates/monty-js/ts/worker/value.ts", "value"));
+        assert!(matches("limitations/os.md", "os"));
     }
 
     #[test]
     fn near_misses_do_not_match() {
-        assert!(!basename_matches("crates/monty/tests/os_tests.rs", "os.rs"));
-        assert!(!basename_matches("crates/monty/src/os_dispatch.rs", "os.rs"));
+        assert!(!matches("crates/monty/tests/os_tests.rs", "os.rs"));
+        assert!(!matches("crates/monty/src/os_dispatch.rs", "os.rs"));
     }
 
     #[test]
     fn separators_and_case_still_fold() {
-        assert!(basename_matches("crates/monty/src/heap_traits.rs", "heaptraits"));
-        assert!(basename_matches("crates/monty/src/heap_traits.rs", "HEAP-TRAITS.rs"));
+        assert!(matches("crates/monty/src/heap_traits.rs", "heaptraits"));
+        assert!(matches("crates/monty/src/heap_traits.rs", "HEAP-TRAITS.rs"));
     }
 
     #[test]
     fn leading_dot_names_have_no_extension() {
-        assert!(basename_matches("some/dir/.gitignore", ".gitignore"));
+        assert!(matches("some/dir/.gitignore", ".gitignore"));
     }
 }
