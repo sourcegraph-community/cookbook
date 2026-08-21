@@ -49,16 +49,16 @@ pub struct BasenameQuery {
     ext: Option<String>,
 }
 
-/// Prepare `query` for [`BasenameQuery::matches`].
-pub fn basename_query(query: &str) -> BasenameQuery {
-    let (stem, ext) = split_ext(query);
-    BasenameQuery {
-        stem: normalize(stem),
-        ext: ext.map(str::to_lowercase),
-    }
-}
-
 impl BasenameQuery {
+    /// Prepare `query` for [`BasenameQuery::matches`].
+    pub fn new(query: &str) -> BasenameQuery {
+        let (stem, ext) = split_ext(query);
+        BasenameQuery {
+            stem: normalize(stem),
+            ext: ext.map(str::to_lowercase),
+        }
+    }
+
     /// True when the query names this path's basename, for the §6.1 hoist. A
     /// query carrying an extension must match it, so `os.rs` hoists the files
     /// actually named `os.rs` and not `os.md` or `os.pyi`; a bare `os` still
@@ -85,10 +85,10 @@ impl BasenameQuery {
 
 #[cfg(test)]
 mod tests {
-    use super::basename_query;
+    use super::BasenameQuery;
 
     fn matches(path: &str, query: &str) -> bool {
-        basename_query(query).matches(path)
+        BasenameQuery::new(query).matches(path)
     }
 
     #[test]

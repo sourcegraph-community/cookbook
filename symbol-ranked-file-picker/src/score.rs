@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 
-use crate::normalize::basename_query;
+use crate::normalize::BasenameQuery;
 use crate::symbols::{SymbolMatch, Tier};
 
 /// Score weights, ordered exactly as spec §7's table. Each tier must clear
@@ -78,23 +78,21 @@ pub struct Scored<'a> {
 }
 
 /// Score and rank every tracked file against `query`, returning the top
-/// `limit` paths best-first. `symbols` is the already-tier-classified match
-/// map from [`crate::symbols::lookup`] (or empty if the symbol channel was
-/// skipped/cold this keystroke); `recent` is the last-25-commits file set.
+/// `limit` paths best-first. `bq` is the §6.1 basename query the caller
+/// already built (it needs the answer before deciding whether to touch
+/// Sourcegraph, so building a second one here would re-normalize every
+/// tracked basename a second time on every keystroke). `symbols` is the
+/// already-tier-classified match map from [`crate::symbols::lookup`] (or
+/// empty if the symbol channel was skipped/cold this keystroke); `recent` is
+/// the last-25-commits file set.
 pub fn rank<'a>(
     tracked: &'a [String],
     query: &str,
+    bq: &BasenameQuery,
     symbols: &HashMap<String, SymbolMatch>,
     recent: &HashSet<String>,
     limit: usize,
 ) -> Vec<Scored<'a>> {
-    let bq = basename_query(query);
-    let basename_exact: HashSet<&str> = tracked
-        .iter()
-        .filter(|p| bq.matches(p))
-        .map(String::as_str)
-        .collect();
-
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let fuzzy: HashMap<&str, u32> = if query.is_empty() {
         HashMap::new()
@@ -109,7 +107,7 @@ pub fn rank<'a>(
         .iter()
         .filter_map(|path| {
             let path = path.as_str();
-            let is_basename_exact = basename_exact.contains(path);
+            let is_basename_exact = bq.matches(path);
             let symbol = symbols.get(path);
             let fuzzy_score = fuzzy.get(path).copied();
 
@@ -149,4 +147,169 @@ pub fn rank<'a>(
     candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
     candidates.truncate(limit);
     candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn sym(tier: Tier, is_eponymous: bool, is_common: bool) -> SymbolMatch {
+        SymbolMatch {
+            tier,
+            is_eponymous,
+            is_common,
+        }
+    }
+
+    /// `(path, score)` best-first. Fixtures deliberately use queries that
+    /// fuzzy-match none of their paths, so scores are the weight table alone
+    /// and ties fall back to input (`git ls-files`) order.
+    fn ranked(
+        tracked: &[String],
+        query: &str,
+        symbols: &[(&str, SymbolMatch)],
+    ) -> Vec<(String, i64)> {
+        let symbols: HashMap<String, SymbolMatch> =
+            symbols.iter().map(|(p, m)| (p.to_string(), *m)).collect();
+        rank(
+            tracked,
+            query,
+            &BasenameQuery::new(query),
+            &symbols,
+            &HashSet::new(),
+            SUGGESTION_LIMIT_FOR_TESTS,
+        )
+        .into_iter()
+        .map(|s| (s.path.to_string(), s.score))
+        .collect()
+    }
+
+    const SUGGESTION_LIMIT_FOR_TESTS: usize = 15;
+
+    #[test]
+    fn basename_exact_outranks_a_symbol_exact_elsewhere() {
+        let tracked = paths(&["src/dropguard.rs", "src/registry.rs"]);
+        let out = ranked(
+            &tracked,
+            "dropguard.rs",
+            &[("src/registry.rs", sym(Tier::Exact, false, false))],
+        );
+        assert_eq!(out[0].0, "src/dropguard.rs");
+    }
+
+    #[test]
+    fn prose_files_are_demoted_below_code() {
+        let tracked = paths(&["docs/notes.md", "src/guard.rs"]);
+        let out = ranked(
+            &tracked,
+            "dropguard",
+            &[
+                ("docs/notes.md", sym(Tier::Exact, false, false)),
+                ("src/guard.rs", sym(Tier::Exact, false, false)),
+            ],
+        );
+        assert_eq!(out[0].0, "src/guard.rs");
+        assert_eq!(out[0].1, weight::SYMBOL_EXACT);
+        assert_eq!(out[1].1, weight::SYMBOL_PREFIX);
+    }
+
+    #[test]
+    fn definition_outranks_reexport_but_never_in_prose() {
+        // Same tier: the eponymous (definition) file wins by the §6.6 bonus.
+        let code = paths(&["a/zzz.rs", "b/yyy.rs"]);
+        let out = ranked(
+            &code,
+            "dropguard",
+            &[
+                ("a/zzz.rs", sym(Tier::Prefix, false, false)),
+                ("b/yyy.rs", sym(Tier::Prefix, true, false)),
+            ],
+        );
+        assert_eq!(out[0].0, "b/yyy.rs");
+        assert_eq!(
+            out[0].1,
+            weight::SYMBOL_PREFIX + weight::EPONYMOUS_DEFINITION
+        );
+
+        // Prose is never a definition site, so the bonus is withheld and the
+        // tie falls back to `git ls-files` order.
+        let prose = paths(&["a/zzz.md", "b/yyy.md"]);
+        let out = ranked(
+            &prose,
+            "dropguard",
+            &[
+                ("a/zzz.md", sym(Tier::Prefix, false, false)),
+                ("b/yyy.md", sym(Tier::Prefix, true, false)),
+            ],
+        );
+        assert_eq!(out[0].0, "a/zzz.md");
+        assert_eq!(out[0].1, out[1].1);
+    }
+
+    #[test]
+    fn a_ubiquitous_symbol_name_loses_to_a_rare_one() {
+        let tracked = paths(&["a/zzz.rs", "b/yyy.rs"]);
+        let out = ranked(
+            &tracked,
+            "dropguard",
+            &[
+                ("a/zzz.rs", sym(Tier::Exact, false, true)),
+                ("b/yyy.rs", sym(Tier::Exact, false, false)),
+            ],
+        );
+        assert_eq!(out[0].0, "b/yyy.rs");
+        assert_eq!(out[1].1, weight::SYMBOL_PREFIX);
+    }
+
+    #[test]
+    fn prose_and_ubiquity_demotions_stack() {
+        let tracked = paths(&["a/zzz.md"]);
+        let out = ranked(
+            &tracked,
+            "dropguard",
+            &[("a/zzz.md", sym(Tier::Exact, true, true))],
+        );
+        assert_eq!(out[0].1, weight::SYMBOL_SUBSTRING);
+    }
+
+    #[test]
+    fn recency_alone_never_qualifies() {
+        let tracked = paths(&["z/unrelated.txt"]);
+        let recent: HashSet<String> = tracked.iter().cloned().collect();
+        let out = rank(
+            &tracked,
+            "dropguard",
+            &BasenameQuery::new("dropguard"),
+            &HashMap::new(),
+            &recent,
+            SUGGESTION_LIMIT_FOR_TESTS,
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn recency_breaks_a_tie_between_equal_scores() {
+        let tracked = paths(&["a/zzz.rs", "b/yyy.rs"]);
+        let recent: HashSet<String> = ["b/yyy.rs".to_string()].into_iter().collect();
+        let symbols: HashMap<String, SymbolMatch> = [
+            ("a/zzz.rs".to_string(), sym(Tier::Prefix, false, false)),
+            ("b/yyy.rs".to_string(), sym(Tier::Prefix, false, false)),
+        ]
+        .into_iter()
+        .collect();
+        let out = rank(
+            &tracked,
+            "dropguard",
+            &BasenameQuery::new("dropguard"),
+            &symbols,
+            &recent,
+            SUGGESTION_LIMIT_FOR_TESTS,
+        );
+        assert_eq!(out[0].path, "b/yyy.rs");
+        assert_eq!(out[0].score - out[1].score, weight::RECENT);
+    }
 }

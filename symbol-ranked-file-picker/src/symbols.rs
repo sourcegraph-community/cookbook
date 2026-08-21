@@ -4,13 +4,12 @@
 //! The two halves share `cache_path` and `sym_query` so a hot-path miss and
 //! the `--warm` process it spawns always agree on where the answer belongs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cache::{age_secs, ensure_cache_dir, hash_key};
-use crate::git::active_lock;
 use crate::normalize::{normalize, normalized_basename};
 
 /// Cache/fetch granularity and gate (spec §4c, §6.2): fetch once per 4-char
@@ -20,6 +19,10 @@ pub const PREFIX_LEN: usize = 4;
 const CACHE_TTL_SECS: u64 = 60 * 60 * 24;
 const FETCH_COUNT: u32 = 500;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(25);
+/// A fetch lock older than this was left behind by a killed or hung `--warm`
+/// (spec §4c) and must not wedge the fallback forever. Comfortably above
+/// `FETCH_TIMEOUT` so a slow-but-live fetch is never mistaken for a dead one.
+const LOCK_STALE_SECS: u64 = 90;
 
 /// The lowercased (never-normalized, §6.3) first `PREFIX_LEN` *characters* of
 /// the query, or `None` if the query has fewer than that. Sliced by `char`,
@@ -28,9 +31,16 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(25);
 /// would violate spec §2's "never panic" on nothing more exotic than a user
 /// typing an accented or CJK filename.
 pub fn prefix_of(query: &str) -> Option<String> {
-    let mut chars = query.chars();
-    let prefix: String = chars.by_ref().take(PREFIX_LEN).collect();
+    let prefix: String = query.chars().take(PREFIX_LEN).collect();
     (prefix.chars().count() == PREFIX_LEN).then(|| prefix.to_lowercase())
+}
+
+/// Does a fresh symbol-fetch lock exist at `path`? A `true` here means some
+/// other process is already warming this prefix, so the caller (hot path or
+/// `--warm` itself) must not start a second fetch. A missing or stale
+/// ([`LOCK_STALE_SECS`]) lock is not "active".
+fn active_lock(path: &Path) -> bool {
+    age_secs(path).is_some_and(|age| age <= LOCK_STALE_SECS)
 }
 
 /// Where the symbol cache/lock for this `(endpoint, repo, prefix)` live.
@@ -94,7 +104,10 @@ impl SymbolMatch {
     /// definition-over-re-export. Comparing *effective* tiers matters — a
     /// rare prefix match is better evidence than a ubiquitous exact one.
     fn strength(&self) -> (Option<Tier>, bool) {
-        (self.tier.demote(u32::from(self.is_common)), self.is_eponymous)
+        (
+            self.tier.demote(u32::from(self.is_common)),
+            self.is_eponymous,
+        )
     }
 }
 
@@ -110,15 +123,24 @@ pub fn lookup(
     repo: &str,
     prefix: &str,
     normalized_query: &str,
-    tracked: &std::collections::HashSet<&str>,
+    tracked: &HashSet<&str>,
 ) -> Option<HashMap<String, SymbolMatch>> {
     let (cache_path, _lock_path) = cache_paths(endpoint, repo, prefix)?;
-    let age = age_secs(&cache_path)?;
-    if age >= CACHE_TTL_SECS {
+    if age_secs(&cache_path)? >= CACHE_TTL_SECS {
         return None;
     }
     let contents = std::fs::read_to_string(&cache_path).ok()?;
+    Some(classify(&contents, normalized_query, tracked))
+}
 
+/// The ranking half of [`lookup`], split out from the cache read so the two
+/// passes below are testable without a filesystem fixture: turn cache lines
+/// into one best `SymbolMatch` per tracked path.
+fn classify(
+    contents: &str,
+    normalized_query: &str,
+    tracked: &HashSet<&str>,
+) -> HashMap<String, SymbolMatch> {
     // First pass: classify, and count how many distinct files claim each
     // matched symbol name. The cache lines are sorted and deduped by
     // `fetch_and_write`, so one line is one (symbol, file) claim and the
@@ -163,15 +185,16 @@ pub fn lookup(
             })
             .or_insert(candidate);
     }
-    Some(best)
+    best
 }
 
-/// Should the hot path bother with the symbol channel at all? Per spec §5:
-/// query long enough to have a prefix, no path separator (`@src/foo` is a
-/// path hint, not a symbol query), and — §6.1 — no exact basename match
-/// already found (which wins outright and is also strictly faster).
+/// Should the hot path bother with the symbol channel at all? Per spec §5: no
+/// path separator (`@src/foo` is a path hint, not a symbol query) and — §6.1 —
+/// no exact basename match already found (which wins outright and is also
+/// strictly faster). The "long enough to have a prefix" half of the gate is
+/// [`prefix_of`] itself, which the caller applies first.
 pub fn should_attempt(query: &str, has_basename_exact: bool) -> bool {
-    !has_basename_exact && !query.contains('/') && prefix_of(query).is_some()
+    !has_basename_exact && !query.contains('/')
 }
 
 /// Self-spawn `file-suggestion --warm <prefix>` fully detached: no waited-on
@@ -335,4 +358,75 @@ fn fetch_and_write(
     file.write_all(lines.join("\n").as_bytes()).ok()?;
     drop(file);
     std::fs::rename(&tmp, cache_path).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tracked<'a>(list: &[&'a str]) -> HashSet<&'a str> {
+        list.iter().copied().collect()
+    }
+
+    #[test]
+    fn prefix_is_char_sliced_and_lowercased() {
+        assert_eq!(prefix_of("DropGuard").as_deref(), Some("drop"));
+        assert_eq!(prefix_of("dro"), None);
+        // Spec §2: a byte slice at a fixed offset would panic here.
+        assert_eq!(prefix_of("héllo").as_deref(), Some("héll"));
+        assert_eq!(prefix_of("日本語"), None);
+    }
+
+    #[test]
+    fn demotions_stack_down_to_nothing() {
+        assert_eq!(Tier::Exact.demote(0), Some(Tier::Exact));
+        assert_eq!(Tier::Exact.demote(1), Some(Tier::Prefix));
+        assert_eq!(Tier::Exact.demote(2), Some(Tier::Substring));
+        assert_eq!(Tier::Exact.demote(3), None);
+        assert_eq!(Tier::Substring.demote(1), None);
+    }
+
+    #[test]
+    fn strongest_tier_per_file_wins() {
+        let cache = "dropguardian\tsrc/guard.rs\ndropguard\tsrc/guard.rs\n";
+        let out = classify(cache, "dropguard", &tracked(&["src/guard.rs"]));
+        assert_eq!(out["src/guard.rs"].tier, Tier::Exact);
+    }
+
+    #[test]
+    fn untracked_paths_and_non_matches_are_dropped() {
+        // Spec §3: an `@` mention must resolve to a file actually on disk.
+        let cache = "dropguard\tvendor/gone.rs\nunrelated\tsrc/guard.rs\n";
+        let out = classify(cache, "dropguard", &tracked(&["src/guard.rs"]));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn eponymous_marks_the_definition_site() {
+        let cache = "dropguard\tsrc/drop_guard.rs\ndropguard\tsrc/lib.rs\n";
+        let out = classify(
+            cache,
+            "dropguard",
+            &tracked(&["src/drop_guard.rs", "src/lib.rs"]),
+        );
+        assert!(out["src/drop_guard.rs"].is_eponymous);
+        assert!(!out["src/lib.rs"].is_eponymous);
+    }
+
+    #[test]
+    fn a_name_claimed_by_many_files_is_marked_common() {
+        let paths: Vec<String> = (0..COMMON_SYMBOL_FILES)
+            .map(|i| format!("src/f{i}.rs"))
+            .collect();
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+
+        let at_threshold: String = refs.iter().map(|p| format!("string\t{p}\n")).collect();
+        let out = classify(&at_threshold, "string", &tracked(&refs));
+        assert_eq!(out.len(), COMMON_SYMBOL_FILES);
+        assert!(out.values().all(|m| m.is_common));
+
+        let below: String = refs[1..].iter().map(|p| format!("string\t{p}\n")).collect();
+        let out = classify(&below, "string", &tracked(&refs));
+        assert!(out.values().all(|m| !m.is_common));
+    }
 }
