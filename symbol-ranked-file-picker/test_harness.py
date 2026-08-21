@@ -70,7 +70,16 @@ def invoke(repo_dir, query, env_extra=None):
 # --- Ranking (spec §10) -------------------------------------------------
 
 RANKING_CASES = [
-    ("heap", "crates/monty/src/heap.rs"),
+    # §6.1 basename-exact, both ways the user types it. `heap` used to live
+    # here, but monty refactored `heap.rs` into `heap/mod.rs` and no file's
+    # basename stem is `heap` any more, so the case stopped exercising the
+    # hoist it was written for.
+    ("heap_traits", "crates/monty/src/heap_traits.rs"),
+    # Same file, query typed with its extension. Fuzzy scoring alone happens
+    # to rank `heap_traits.rs` first either way, so `all.rs` below is the case
+    # that actually fails without the hoist.
+    ("heap_traits.rs", "crates/monty/src/heap_traits.rs"),
+    ("all.rs", "crates/monty/src/builtins/all.rs"),
     ("dropg", "crates/monty/src/heap_traits.rs"),  # DropGuard, §7 mid-word case
     ("dropgu", "crates/monty/src/heap_traits.rs"),
     ("dropgua", "crates/monty/src/heap_traits.rs"),
@@ -80,7 +89,7 @@ RANKING_CASES = [
     # renamed it; assert the name the index actually carries, not the one a
     # local checkout happens to be pinned to.
     ("resolve_virtual_path", "crates/monty-fs/src/path_security.rs"),
-    ("collect_cycles", "crates/monty/src/heap.rs"),
+    ("collect_cycles", "crates/monty/src/heap/mod.rs"),
     # §7.1 rarity demotion: `string` is claimed by 9 files here and `resolve`
     # by 10, so completing either word used to hand rank 1 to whatever
     # `git ls-files` listed first (telemetry.rs, worker/transport.ts) rather
@@ -145,10 +154,16 @@ def run_regressions(repo_dir):
     print("\n=== Regression: spec §6 landmines ===")
     results = {}
 
-    # §6.1 — exact basename must win outright, not just make the top 3.
+    # §6.1 — exact basename must win outright, not just make the top 3. The
+    # query carries its extension on purpose: that is the form that used to
+    # miss the hoist entirely (see normalize::basename_matches). `all.rs` is
+    # chosen because fuzzy scoring alone ranks `lib.rs` and `call.rs` above it,
+    # so this assertion fails if the hoist ever stops firing.
     clear_cache()
-    paths, _, _ = invoke(repo_dir, "heap")
-    results["6.1 basename-exact is rank 1"] = bool(paths) and paths[0] == "crates/monty/src/heap.rs"
+    paths, _, _ = invoke(repo_dir, "all.rs")
+    results["6.1 basename-exact is rank 1"] = (
+        bool(paths) and paths[0] == "crates/monty/src/builtins/all.rs"
+    )
 
     # §6.2 — cache on the 4-char prefix, not the full query: warming "drop"
     # once must answer dropg/dropgu/dropgua/dropguard without any further
