@@ -90,9 +90,8 @@ fn run_hook_mode() {
     // §6.1: an exact basename match wins outright and skips the symbol path
     // entirely — computed here (not inside score::rank) because it also
     // gates whether we touch Sourcegraph at all.
-    let has_basename_exact = tracked
-        .iter()
-        .any(|p| normalize::basename_matches(p, &query));
+    let basename_q = normalize::basename_query(&query);
+    let has_basename_exact = tracked.iter().any(|p| basename_q.matches(p));
 
     let endpoint = sg_endpoint();
     let symbol_matches = if symbols::should_attempt(&query, has_basename_exact) {

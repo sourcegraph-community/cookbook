@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 
-use crate::normalize::basename_matches;
+use crate::normalize::basename_query;
 use crate::symbols::{SymbolMatch, Tier};
 
 /// Score weights, ordered exactly as spec §7's table. Each tier must clear
@@ -88,9 +88,10 @@ pub fn rank<'a>(
     recent: &HashSet<String>,
     limit: usize,
 ) -> Vec<Scored<'a>> {
+    let bq = basename_query(query);
     let basename_exact: HashSet<&str> = tracked
         .iter()
-        .filter(|p| basename_matches(p, query))
+        .filter(|p| bq.matches(p))
         .map(String::as_str)
         .collect();
 
