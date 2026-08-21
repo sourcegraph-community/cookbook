@@ -92,7 +92,7 @@ fn run_hook_mode() {
     // gates whether we touch Sourcegraph at all.
     let has_basename_exact = tracked
         .iter()
-        .any(|p| normalize::normalized_basename(p) == normalized_query);
+        .any(|p| normalize::basename_matches(p, &query));
 
     let endpoint = sg_endpoint();
     let symbol_matches = if symbols::should_attempt(&query, has_basename_exact) {
@@ -124,7 +124,6 @@ fn run_hook_mode() {
 
     let ranked = score::rank(
         &tracked,
-        &normalized_query,
         &query,
         &symbol_matches,
         &recent,

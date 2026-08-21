@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 
-use crate::normalize::normalized_basename;
+use crate::normalize::basename_matches;
 use crate::symbols::{SymbolMatch, Tier};
 
 /// Score weights, ordered exactly as spec §7's table. Each tier must clear
@@ -83,7 +83,6 @@ pub struct Scored<'a> {
 /// skipped/cold this keystroke); `recent` is the last-25-commits file set.
 pub fn rank<'a>(
     tracked: &'a [String],
-    normalized_query: &str,
     query: &str,
     symbols: &HashMap<String, SymbolMatch>,
     recent: &HashSet<String>,
@@ -91,7 +90,7 @@ pub fn rank<'a>(
 ) -> Vec<Scored<'a>> {
     let basename_exact: HashSet<&str> = tracked
         .iter()
-        .filter(|p| normalized_basename(p) == normalized_query)
+        .filter(|p| basename_matches(p, query))
         .map(String::as_str)
         .collect();
 
