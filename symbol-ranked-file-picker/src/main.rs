@@ -84,46 +84,48 @@ fn run_hook_mode() {
     }
     let recent = git::recent_files(&repo);
 
-    let normalized_query = normalize(&query);
-    let tracked_set: HashSet<&str> = tracked.iter().map(String::as_str).collect();
-
     // §6.1: an exact basename match wins outright and skips the symbol path
     // entirely — computed here (not inside score::rank) because it also
-    // gates whether we touch Sourcegraph at all.
-    let basename_q = normalize::basename_query(&query);
+    // gates whether we touch Sourcegraph at all. `basename_q` is handed to
+    // `rank` below so the normalization is paid for once, not twice.
+    let basename_q = normalize::BasenameQuery::new(&query);
     let has_basename_exact = tracked.iter().any(|p| basename_q.matches(p));
 
     let endpoint = sg_endpoint();
-    let symbol_matches = if symbols::should_attempt(&query, has_basename_exact) {
-        let prefix = symbols::prefix_of(&query).expect("should_attempt implies a prefix exists");
-        match git::repo_slug(&repo) {
-            Some(repo_slug) => match symbols::lookup(
+    // `prefix_of` is the gate rather than an assertion behind one: spec §2
+    // forbids panicking, so the prefix's existence must be the same `Option`
+    // the rest of the symbol path hangs off, not an invariant asserted from
+    // another module. Everything inside this closure — including the tracked
+    // set and the normalized query — is only built when symbols are in play.
+    let symbol_matches = symbols::prefix_of(&query)
+        .filter(|_| symbols::should_attempt(&query, has_basename_exact))
+        .and_then(|prefix| {
+            let repo_slug = git::repo_slug(&repo)?;
+            let tracked_set: HashSet<&str> = tracked.iter().map(String::as_str).collect();
+            let normalized_query = normalize(&query);
+            symbols::lookup(
                 &endpoint,
                 &repo_slug,
                 &prefix,
                 &normalized_query,
                 &tracked_set,
-            ) {
-                Some(matches) => matches,
-                None => {
-                    // Cold/stale cache: never block on the network (spec §5).
-                    // Emit local-only results now and let a detached `--warm`
-                    // fill the cache in for the *next* keystroke.
-                    if symbols::needs_warm(&endpoint, &repo_slug, &prefix) {
-                        symbols::spawn_warm(&prefix);
-                    }
-                    Default::default()
+            )
+            .or_else(|| {
+                // Cold/stale cache: never block on the network (spec §5).
+                // Emit local-only results now and let a detached `--warm`
+                // fill the cache in for the *next* keystroke.
+                if symbols::needs_warm(&endpoint, &repo_slug, &prefix) {
+                    symbols::spawn_warm(&prefix);
                 }
-            },
-            None => Default::default(),
-        }
-    } else {
-        Default::default()
-    };
+                None
+            })
+        })
+        .unwrap_or_default();
 
     let ranked = score::rank(
         &tracked,
         &query,
+        &basename_q,
         &symbol_matches,
         &recent,
         SUGGESTION_LIMIT,

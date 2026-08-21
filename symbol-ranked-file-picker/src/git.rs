@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::cache::{age_secs, ensure_cache_dir, hash_key, system_time_nanos};
+use crate::cache::{cached_by_mtime, ensure_cache_dir, hash_key};
 
 /// A resolved git repository: the work tree root, the (possibly
 /// worktree-specific) git dir holding `HEAD`/`index`, and the common git dir
@@ -82,39 +82,14 @@ fn resolve_common_dir(git_dir: &Path) -> PathBuf {
 /// `.git/index`'s mtime changes (spec §4a). The common case — index
 /// unchanged since last run — is a single file read, no spawn.
 pub fn tracked_files(repo: &Repo) -> Vec<String> {
-    let index_path = repo.git_dir.join("index");
-    let index_mtime = std::fs::metadata(&index_path)
-        .ok()
-        .and_then(|m| m.modified().ok());
-
-    let cache_dir = ensure_cache_dir();
-    let key = hash_key(&["files", &repo.work_dir.to_string_lossy()]);
-    let list_path = cache_dir.as_ref().map(|d| d.join(format!("files-{key}")));
-    let meta_path = cache_dir
-        .as_ref()
-        .map(|d| d.join(format!("files-{key}.meta")));
-
-    if let (Some(list_path), Some(meta_path)) = (&list_path, &meta_path) {
-        if let (Ok(cached_meta), Some(mtime)) = (std::fs::read_to_string(meta_path), index_mtime) {
-            if cached_meta.trim().parse::<u128>().ok() == Some(system_time_nanos(mtime)) {
-                if let Ok(contents) = std::fs::read_to_string(list_path) {
-                    return contents.lines().map(str::to_owned).collect();
-                }
-            }
-        }
-    }
-
-    // Cache miss (or no cache dir available): pay for the one spawn this
-    // module allows, then persist so the next keystroke doesn't repeat it.
-    let files = run_git(&repo.work_dir, &["ls-files"])
-        .map(|out| out.lines().map(str::to_owned).collect::<Vec<_>>())
-        .unwrap_or_default();
-
-    if let (Some(list_path), Some(meta_path), Some(mtime)) = (&list_path, &meta_path, index_mtime) {
-        let _ = std::fs::write(list_path, files.join("\n"));
-        let _ = std::fs::write(meta_path, system_time_nanos(mtime).to_string());
-    }
-    files
+    let work_dir = repo.work_dir.to_string_lossy();
+    // Cache miss pays for the one spawn this module allows, then persists so
+    // the next keystroke doesn't repeat it.
+    cached_by_mtime(&["files", &work_dir], &repo.git_dir.join("index"), || {
+        run_git(&repo.work_dir, &["ls-files"])
+    })
+    .map(|out| out.lines().map(str::to_owned).collect())
+    .unwrap_or_default()
 }
 
 /// Files touched in the last `RECENT_COMMITS` commits, deduped, cached per
@@ -192,37 +167,14 @@ fn resolve_head_sha(repo: &Repo) -> Option<String> {
 /// changes), same pattern as [`tracked_files`].
 pub fn repo_slug(repo: &Repo) -> Option<String> {
     let config_path = repo.common_dir.join("config");
-    let config_mtime = std::fs::metadata(&config_path)
-        .ok()
-        .and_then(|m| m.modified().ok());
-
-    let cache_dir = ensure_cache_dir();
-    let key = hash_key(&["repo", &repo.common_dir.to_string_lossy()]);
-    let slug_path = cache_dir.as_ref().map(|d| d.join(format!("repo-{key}")));
-    let meta_path = cache_dir
-        .as_ref()
-        .map(|d| d.join(format!("repo-{key}.meta")));
-
-    if let (Some(slug_path), Some(meta_path)) = (&slug_path, &meta_path) {
-        if let (Ok(cached_meta), Some(mtime)) = (std::fs::read_to_string(meta_path), config_mtime) {
-            if cached_meta.trim().parse::<u128>().ok() == Some(system_time_nanos(mtime)) {
-                if let Ok(slug) = std::fs::read_to_string(slug_path) {
-                    return Some(slug.trim().to_string()).filter(|s| !s.is_empty());
-                }
-            }
-        }
-    }
-
-    let url = read_remote_origin_url(&config_path)
-        .or_else(|| run_git(&repo.work_dir, &["config", "--get", "remote.origin.url"]))?;
-    let slug = normalize_repo_url(url.trim());
-
-    if let (Some(slug_path), Some(meta_path), Some(mtime)) = (&slug_path, &meta_path, config_mtime)
-    {
-        let _ = std::fs::write(slug_path, &slug);
-        let _ = std::fs::write(meta_path, system_time_nanos(mtime).to_string());
-    }
-    Some(slug).filter(|s| !s.is_empty())
+    let common_dir = repo.common_dir.to_string_lossy();
+    cached_by_mtime(&["repo", &common_dir], &config_path, || {
+        let url = read_remote_origin_url(&config_path)
+            .or_else(|| run_git(&repo.work_dir, &["config", "--get", "remote.origin.url"]))?;
+        Some(normalize_repo_url(url.trim()))
+    })
+    .map(|slug| slug.trim().to_string())
+    .filter(|s| !s.is_empty())
 }
 
 /// Minimal INI read of `remote.origin.url` from a git `config` file. Only
@@ -291,13 +243,4 @@ fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
     String::from_utf8(output.stdout)
         .ok()
         .map(|s| s.trim_end().to_string())
-}
-
-/// Does a fresh (<=90s old) symbol-fetch lock exist at `path`? A `true` here
-/// means some other process is already warming this prefix, so the caller
-/// (hot path or `--warm` itself) must not start a second fetch. A missing or
-/// stale (spec §4c) lock is not "active" — a stale one was left behind by a
-/// killed/hung fetch and must not wedge the fallback forever.
-pub fn active_lock(path: &Path) -> bool {
-    age_secs(path).is_some_and(|age| age <= 90)
 }
