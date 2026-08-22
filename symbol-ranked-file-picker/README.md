@@ -4,7 +4,43 @@ Replace Claude Code's `@` file picker with one that ranks by symbol, not just by
 
 Blog post: https://sourcegraph.com/blog/claude-code-file-picker-symbol-ranking
 
-Video: TODO
+## Prerequisites
+
+- Claude Code.
+- Rust. `rust-toolchain.toml` pins this directory to `stable`, so `cargo build` picks the right toolchain without touching your global default.
+- A repo that your Sourcegraph instance has indexed. Symbol ranking is the whole point, and it comes from the index. Everything else still works without it.
+- Python 3 if you want to run the test harness.
+
+## Quickstart
+
+One line, no clone:
+
+```sh
+curl -sL https://github.com/sourcegraph-community/cookbook/archive/refs/heads/main.zip -o cookbook.zip && unzip -qo cookbook.zip 'cookbook-main/symbol-ranked-file-picker/*' 'cookbook-main/LICENSE' && (cd cookbook-main/symbol-ranked-file-picker && env -u RUSTUP_TOOLCHAIN cargo build --release && cp target/release/file-suggestion ~/.claude/file-suggestion)
+```
+
+Or clone and build:
+
+```sh
+git clone https://github.com/sourcegraph-community/cookbook.git
+cd cookbook/symbol-ranked-file-picker
+cargo build --release
+cp target/release/file-suggestion ~/.claude/file-suggestion
+```
+
+Do not pipe `cargo build` into `tail` or `head`. It eats the exit code, and you will happily install a stale binary.
+
+Wire it into `~/.claude/settings.json`:
+
+```json
+{
+  "fileSuggestion": { "type": "command", "command": "~/.claude/file-suggestion" }
+}
+```
+
+`fileSuggestion` is a top-level key, not one of the entries under `hooks`.
+
+Restart Claude Code, `cd` into an indexed repo, and type `@` followed by a symbol name.
 
 ## What it does
 
@@ -29,36 +65,6 @@ Because the hook runs on every keystroke, the network is never on the hot path. 
 | `src/symbols.rs` | Sourcegraph symbol search, prefix caching, rarity demotion. |
 | `src/git.rs` | Tracked files, recent files, repo slug, all cached, no subprocess on the hot path. |
 | `test_harness.py` | Acceptance harness: ranking, regressions, robustness, latency, security. |
-
-## Prerequisites
-
-- Claude Code.
-- Rust. `rust-toolchain.toml` pins this directory to `stable`, so `cargo build` picks the right toolchain without touching your global default.
-- A repo that your Sourcegraph instance has indexed. Symbol ranking is the whole point, and it comes from the index. Everything else still works without it.
-- Python 3 if you want to run the test harness.
-
-## Quickstart
-
-Build and install the binary where the hook will find it:
-
-```sh
-cargo build --release
-cp target/release/file-suggestion ~/.claude/file-suggestion
-```
-
-Do not pipe `cargo build` into `tail` or `head`. It eats the exit code, and you will happily install a stale binary.
-
-Wire it into `~/.claude/settings.json`:
-
-```json
-{
-  "fileSuggestion": { "type": "command", "command": "~/.claude/file-suggestion" }
-}
-```
-
-`fileSuggestion` is a top-level key, not one of the entries under `hooks`.
-
-Restart Claude Code, `cd` into an indexed repo, and type `@` followed by a symbol name.
 
 ## Try it without installing
 
