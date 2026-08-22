@@ -2,6 +2,8 @@
 
 Replace Claude Code's `@` file picker with one that ranks by symbol, not just by filename, using a Sourcegraph symbol search. Typing `@collect_cycles` gets you `heap.rs`; typing `@resolve_virtual_path` gets you `path_security.rs`. Neither filename contains the query.
 
+Blog post: https://sourcegraph.com/blog/claude-code-file-picker-symbol-ranking
+
 Video: TODO
 
 ## What it does
@@ -10,13 +12,15 @@ Claude Code exposes a `fileSuggestion` hook: when you type `@` in the prompt, it
 
 Filename fuzzy matching only knows what a file is called. It cannot help when you know the function name but not the file it lives in, which is most of the time in an unfamiliar repo. So this blends three signals into one ranked list (`src/score.rs`):
 
-1. **Filename match** — fuzzy, via [`nucleo-matcher`](https://docs.rs/nucleo-matcher).
-2. **Symbol match** — a Sourcegraph symbol search against the repo you are in, so a query that names a symbol finds the file defining it.
-3. **Git recency** — a file touched in the last 25 commits edges out an equally-scored file that was not.
+1. **Filename match.** Fuzzy, via [`nucleo-matcher`](https://docs.rs/nucleo-matcher).
+2. **Symbol match.** A Sourcegraph symbol search against the repo you are in, so a query that names a symbol finds the file defining it.
+3. **Git recency.** A file touched in the last 25 commits edges out an equally-scored file that was not.
 
-Every tracked path gets one score, the list is sorted once and truncated to 15. An exact basename match (`heap` → `heap.rs`) wins outright and skips the Sourcegraph path entirely.
+Every tracked path gets one score. Sort once, truncate to 15. An exact basename match (`heap` → `heap.rs`) wins outright and skips the Sourcegraph path entirely.
 
-Because the hook runs on every keystroke, the network is never on the hot path. A symbol query is cached to disk per 4-character prefix; a cold prefix returns filename-only results immediately and spawns a detached fetch that fills the cache for the *next* keystroke. Warm p95 is ~11ms.
+![Every keystroke: Claude Code pipes the half-typed query to the file-suggestion binary, which scores each tracked file on filename match, symbol match, and git recency, then sorts and prints the top 15 paths.](docs/keystroke-flow.png)
+
+Because the hook runs on every keystroke, the network is never on the hot path. The binary caches symbol results to disk per 4-character prefix. A cold prefix returns filename-only results immediately and spawns a detached fetch that fills the cache for the *next* keystroke. Warm p95 is ~11ms.
 
 | File | What's in it |
 | --- | --- |
@@ -79,7 +83,7 @@ All optional.
 | --- | --- |
 | `CLAUDE_PROJECT_DIR` | Project root. Falls back to the process cwd. |
 | `CLAUDE_SG_ENDPOINT` | Sourcegraph instance to query. Defaults to `https://sourcegraph.com`. |
-| `SRC_ENDPOINT` / `SRC_ACCESS_TOKEN` | Sends `Authorization: token <SRC_ACCESS_TOKEN>` **only** when `SRC_ENDPOINT` equals the endpoint actually being called. |
+| `SRC_ENDPOINT` / `SRC_ACCESS_TOKEN` | Sends `Authorization: token <SRC_ACCESS_TOKEN>` **only** when `SRC_ENDPOINT` equals the endpoint being called. |
 | `XDG_CACHE_HOME` | Cache root. Defaults to `~/.cache`. |
 | `CLAUDE_FILE_SUGGESTION_DEBUG` | Appends one line per invocation to `<cache_dir>/debug.log`. |
 
@@ -91,7 +95,7 @@ export SRC_ENDPOINT="https://sourcegraph.example.com"
 export SRC_ACCESS_TOKEN="sgp_..."
 ```
 
-The double condition on the token is not paranoia. An earlier version of this hook attached `SRC_ACCESS_TOKEN` unconditionally and leaked a private-instance token to `sourcegraph.com`. The token had to be rotated. `symbols::fetch_and_write` now enforces both conditions together, and `test_harness.py`'s security section proves no `Authorization` header reaches a mismatched endpoint by running a local HTTP server and reading the headers it received.
+The double condition on the token is not paranoia. An earlier version of this hook attached `SRC_ACCESS_TOKEN` unconditionally and leaked a private-instance token to `sourcegraph.com`. The token had to be rotated. `symbols::fetch_and_write` now enforces both conditions together. `test_harness.py`'s security section runs a local HTTP server, reads the headers it received, and proves no `Authorization` header reaches a mismatched endpoint.
 
 Cache lives under `${XDG_CACHE_HOME:-~/.cache}/claude-file-suggestion/`: the tracked-file list (invalidated on `.git/index` mtime), the recent-files list (keyed on `HEAD`), the repo slug (invalidated on `.git/config` mtime), and per-prefix symbol results (24h TTL, negative results cached too).
 
