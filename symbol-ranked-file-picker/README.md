@@ -4,6 +4,10 @@ Replace Claude Code's `@` file picker with one that ranks by symbol, not just by
 
 Blog post: https://sourcegraph.com/blog/claude-code-file-picker-symbol-ranking
 
+[SPEC.md](SPEC.md) is the build spec. Every `§` reference in the source and in
+`test_harness.py` points at a section there, including the §10 acceptance bar
+the harness enforces and the six §6 landmines the comments cite.
+
 ## Prerequisites
 
 - Claude Code.

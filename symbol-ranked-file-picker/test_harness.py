@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Spec §10 acceptance harness for `file-suggestion`.
+"""Spec §10 acceptance harness for `file-suggestion`. See SPEC.md in this
+directory; every `§` reference in this file and in `src/` points there.
 
 Feeds queries on stdin exactly as the real hook does (one process per
 keystroke) and checks rank + latency, so results are reproducible rather
