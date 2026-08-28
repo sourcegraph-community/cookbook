@@ -1,0 +1,3 @@
+# One repository name per line. Blank lines and # comments are ignored.
+github.com/scip-code/scip-go
+github.com/sourcegraph/src-cli

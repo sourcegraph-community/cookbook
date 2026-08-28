@@ -8,6 +8,8 @@ Runnable code from Sourcegraph videos and blog posts. One directory per recipe, 
 | --- | --- | --- |
 | [search-jobs-api](search-jobs-api/) | Run an exhaustive Search Job over the Sourcegraph API and download the results as JSONL | [Watch](https://www.youtube.com/watch?v=Dh-7dZuS89M) |
 | [search-jobs-tui](search-jobs-tui/) | Watch several Search Jobs run at once in a terminal dashboard | TODO |
+| [create-search-context-json](create-search-context-json/) | Create a search context from repository names and their Sourcegraph default branches | TODO |
+| [create-capture-group-insight](create-capture-group-insight/) | Create a search context from repository names and their Sourcegraph default branches | TODO |
 | [symbol-ranked-file-picker](symbol-ranked-file-picker/) | Rank Claude Code's `@` file suggestions by symbol, not filename, with a Sourcegraph symbol search | TODO |
 
 ## Adding a recipe
