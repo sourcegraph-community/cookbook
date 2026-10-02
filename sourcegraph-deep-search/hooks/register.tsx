@@ -3,7 +3,7 @@ import type { EngineInterface, McpToolResult, Register } from 'claude-code'
 
 import type { Answer } from '../types'
 
-const PANE = 'sgs'
+const PANE = 'sourcegraph-deep-search'
 const TITLE = 'Sourcegraph Deep Search'
 const SERVER = 'deepsearch'
 const MAX_MARKDOWN = 10_000
@@ -132,28 +132,28 @@ async function askIntoPane($: EngineInterface, question: string): Promise<Outcom
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
-      name: 'sgs',
+      name: 'sourcegraph-deep-search',
       description: 'Ask Sourcegraph Deep Search a question and show the answer in a side pane',
       argumentHint: '<question>',
     })
     return next(e)
   })
 
-  on('command.run', { command: 'sgs' }, async ($, e) => {
+  on('command.run', { command: 'sourcegraph-deep-search' }, async ($, e) => {
     const question = e.args.trim()
     await $.ui.open({ id: PANE, title: TITLE })
-    if (!question) return { text: 'Usage: /sgs <question>, e.g. /sgs where do Kubernetes repos still use the deprecated io/ioutil package?' }
+    if (!question) return { text: 'Usage: /sourcegraph-deep-search <question>, e.g. /sourcegraph-deep-search where do Kubernetes repos still use the deprecated io/ioutil package?' }
     const outcome = await askIntoPane($, question)
-    if (!outcome.ok) return { text: `sgs: ${outcome.error}` }
+    if (!outcome.ok) return { text: `Deep Search: ${outcome.error}` }
     const a = outcome.answer
-    return { text: `sgs: answered in ${Math.round(a.elapsedMs / 1000)} s, see the pane.${a.url ? ` ${a.url}` : ''}` }
+    return { text: `Deep Search: answered in ${Math.round(a.elapsedMs / 1000)} s, see the pane.${a.url ? ` ${a.url}` : ''}` }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Link, Markdown } = $.ui.resolve(e)
     const a = await read($, current)
 
-    if (a.status === 'idle') return <Text dimColor>Run /sgs &lt;question&gt; to ask Sourcegraph Deep Search.</Text>
+    if (a.status === 'idle') return <Text dimColor>Run /sourcegraph-deep-search &lt;question&gt; to ask Sourcegraph Deep Search.</Text>
 
     return (
       <Box flexDirection="column">

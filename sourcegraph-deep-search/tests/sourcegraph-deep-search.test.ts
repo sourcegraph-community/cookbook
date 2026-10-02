@@ -1,7 +1,7 @@
 import type { CommandRunInput } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
-const PANE = { plugin: 'sourcegraph-deep-search', component: 'Pane', requestId: 'sgs' } as const
+const PANE = { plugin: 'sourcegraph-deep-search', component: 'Pane', requestId: 'sourcegraph-deep-search' } as const
 const PANE_PROPS = {
   title: 'Sourcegraph Deep Search',
   isFocused: false,
@@ -22,7 +22,7 @@ const ANSWER = JSON.stringify({
 
 const connected = { value: { isConnected: true, server: 'plugin:sourcegraph-deep-search:deepsearch' } } as const
 
-test('/sgs asks Deep Search and shows the answer in the pane', async ($, on) => {
+test('/sourcegraph-deep-search asks Deep Search and shows the answer in the pane', async ($, on) => {
   const calls: { server: string; tool: string; args: Record<string, unknown> }[] = []
   on('mcp.connect', async () => connected)
   on('mcp.call', async (_$, e) => {
@@ -31,7 +31,7 @@ test('/sgs asks Deep Search and shows the answer in the pane', async ($, on) => 
   })
   on('ui.open', async () => ({ value: { isPlaced: true } }))
 
-  const ran = await $.command.run({ command: 'sgs', args: 'where do kubernetes repos still use io/ioutil?' } as CommandRunInput)
+  const ran = await $.command.run({ command: 'sourcegraph-deep-search', args: 'where do kubernetes repos still use io/ioutil?' } as CommandRunInput)
   expect(calls).toEqual([{ server: 'plugin:sourcegraph-deep-search:deepsearch', tool: 'deepsearch', args: { question: 'where do kubernetes repos still use io/ioutil?' } }])
   expect(String(ran.text)).toContain(URL)
 
@@ -55,7 +55,7 @@ test('an unauthenticated server tells you to sign in', async ($, on) => {
   })
   on('ui.open', async () => ({ value: { isPlaced: true } }))
 
-  const ran = await $.command.run({ command: 'sgs', args: 'anything' } as CommandRunInput)
+  const ran = await $.command.run({ command: 'sourcegraph-deep-search', args: 'anything' } as CommandRunInput)
   expect(String(ran.text)).toMatch(/needs sign-in\. Run \/mcp/)
   expect(called).toBe(0)
 })
@@ -65,12 +65,12 @@ test('a tool error surfaces as an error', async ($, on) => {
   on('mcp.call', async () => ({ value: { content: [{ type: 'text', text: 'Deep Search is not enabled' }], isError: true } }))
   on('ui.open', async () => ({ value: { isPlaced: true } }))
 
-  const ran = await $.command.run({ command: 'sgs', args: 'anything' } as CommandRunInput)
+  const ran = await $.command.run({ command: 'sourcegraph-deep-search', args: 'anything' } as CommandRunInput)
   expect(String(ran.text)).toMatch(/Deep Search is not enabled/)
 })
 
 test('no question prints usage', async ($, on) => {
   on('ui.open', async () => ({ value: { isPlaced: true } }))
-  const ran = await $.command.run({ command: 'sgs', args: '  ' } as CommandRunInput)
-  expect(String(ran.text)).toMatch(/^Usage: \/sgs <question>/)
+  const ran = await $.command.run({ command: 'sourcegraph-deep-search', args: '  ' } as CommandRunInput)
+  expect(String(ran.text)).toMatch(/^Usage: \/sourcegraph-deep-search <question>/)
 })
