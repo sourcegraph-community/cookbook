@@ -1,1 +1,0 @@
-{ "name": "sgs", "version": "0.1.0", "description": "Sourcegraph code search: /sgs <query> in a side pane, plus a search tool for the model", "types": "./types/index.d.ts" }
