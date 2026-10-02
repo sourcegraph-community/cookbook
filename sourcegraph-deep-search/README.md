@@ -2,6 +2,8 @@
 
 A Claude Code mod that brings Sourcegraph Deep Search into the session. Type `/sourcegraph-deep-search <question>` and Deep Search's answer, with its sources, appears in a side pane.
 
+Video: [Sourcegraph Deep Search in Claude Code](https://x.com/jdorfman/status/2106142195174785378)
+
 ## Prerequisites
 
 - Claude Code with mods (function-hook plugins) available.

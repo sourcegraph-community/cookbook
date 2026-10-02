@@ -9,7 +9,7 @@ Runnable code from Sourcegraph videos and blog posts. One directory per recipe, 
 | [search-jobs-api](search-jobs-api/) | Run an exhaustive Search Job over the Sourcegraph API and download the results as JSONL | [Watch](https://www.youtube.com/watch?v=Dh-7dZuS89M) |
 | [search-jobs-tui](search-jobs-tui/) | Watch several Search Jobs run at once in a terminal dashboard | TODO |
 | [symbol-ranked-file-picker](symbol-ranked-file-picker/) | Rank Claude Code's `@` file suggestions by symbol, not filename, with a Sourcegraph symbol search | TODO |
-| [sourcegraph-deep-search](sourcegraph-deep-search/) | Ask Sourcegraph Deep Search from Claude Code with `/sourcegraph-deep-search` and read the answer in a side pane | TODO |
+| [sourcegraph-deep-search](sourcegraph-deep-search/) | Ask Sourcegraph Deep Search from Claude Code with `/sourcegraph-deep-search` and read the answer in a side pane | [Watch](https://x.com/jdorfman/status/2106142195174785378) |
 
 ## Adding a recipe
 
