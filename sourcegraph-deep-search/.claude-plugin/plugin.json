@@ -1,0 +1,9 @@
+{
+  "name": "sourcegraph-deep-search",
+  "version": "0.1.0",
+  "description": "Sourcegraph Deep Search for Claude Code: /sourcegraph-deep-search <question> answered in a side pane",
+  "types": "./types/index.d.ts",
+  "mcpServers": {
+    "deepsearch": { "type": "http", "url": "https://demo.sourcegraph.com/.api/mcp/deepsearch" }
+  }
+}
