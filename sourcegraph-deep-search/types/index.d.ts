@@ -4,6 +4,7 @@ export type Answer = {
   markdown: string
   url?: string
   elapsedMs: number
+  answeredAt?: number
   error?: string
   seq: number
 }

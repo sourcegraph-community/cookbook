@@ -3,7 +3,20 @@
   "version": "0.1.0",
   "description": "Sourcegraph Deep Search for Claude Code: /sourcegraph-deep-search <question> answered in a side pane",
   "types": "./types/index.d.ts",
+  "userConfig": {
+    "sourcegraph_url": {
+      "type": "string",
+      "title": "Sourcegraph URL",
+      "description": "Your Sourcegraph instance, e.g. https://sourcegraph.example.com (no trailing slash)"
+    }
+  },
   "mcpServers": {
-    "deepsearch": { "type": "http", "url": "https://demo.sourcegraph.com/.api/mcp/deepsearch" }
+    "deepsearch": {
+      "type": "http",
+      "url": "${user_config.sourcegraph_url}/.api/mcp/deepsearch"
+    }
+  },
+  "author": {
+    "name": "Justin Dorfman"
   }
 }
