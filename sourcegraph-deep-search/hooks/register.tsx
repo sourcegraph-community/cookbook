@@ -149,27 +149,26 @@ export function clip(markdown: string) {
   return markdown.length <= MAX_MARKDOWN ? markdown : `${markdown.slice(0, MAX_MARKDOWN - 40).trimEnd()}\n\n…(truncated)`
 }
 
-export function instanceHost(manifest: string) {
+export function instanceHost(url: unknown) {
+  if (typeof url !== 'string' || !url.trim()) return undefined
   try {
-    const url = (JSON.parse(manifest) as { mcpServers?: Record<string, { url?: string }> }).mcpServers?.[SERVER]?.url
-    return url ? new URL(url).host : undefined
+    const u = new URL(url.trim())
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.host : undefined
   } catch {
     return undefined
   }
 }
 
-type Branding = { host?: string; png?: string; svg?: string }
+type Branding = { png?: string; svg?: string }
 let branding: Promise<Branding> | undefined
 
 function loadBranding($: EngineInterface): Promise<Branding> {
   const root = $.plugin.root
   const quiet = <T,>(p: Promise<T>) => p.catch(() => undefined)
   branding ??= Promise.all([
-    quiet($.fs.read(`${root}/.claude-plugin/plugin.json`)),
     quiet($.fs.read(`${root}/${LOGO_PNG}`, { as: 'bytes' })),
     quiet($.fs.read(`${root}/${LOGO_SVG}`)),
-  ]).then(([manifest, png, svg]) => ({
-    host: manifest ? instanceHost(manifest) : undefined,
+  ]).then(([png, svg]) => ({
     png: png?.base64,
     svg,
   }))
@@ -230,7 +229,11 @@ async function askIntoPane($: EngineInterface, question: string): Promise<Outcom
   return outcome
 }
 
-export const register: Register = on => {
+const SETUP = 'Set your Sourcegraph URL first: /config → sourcegraph-deep-search → Sourcegraph URL (e.g. https://sourcegraph.example.com), then run /reload-plugins.'
+
+export const register: Register = (on, options) => {
+  const host = instanceHost(options.sourcegraph_url)
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'sourcegraph-deep-search',
@@ -243,6 +246,7 @@ export const register: Register = on => {
   on('command.run', { command: 'sourcegraph-deep-search' }, async ($, e) => {
     const question = e.args.trim()
     await $.ui.open({ id: PANE, title: TITLE })
+    if (!host) return { text: SETUP }
     if (!question) return { text: 'Usage: /sourcegraph-deep-search <question>, e.g. /sourcegraph-deep-search where do Kubernetes repos still use the deprecated io/ioutil package?' }
     const outcome = await askIntoPane($, question)
     if (!outcome.ok) return { text: `Deep Search: ${outcome.error}` }
@@ -268,14 +272,16 @@ export const register: Register = on => {
           {logo}
           <Text bold>Deep Search</Text>
         </Box>
-        {brand.host && <Text dimColor>{brand.host}</Text>}
+        {host && <Text dimColor>{host}</Text>}
       </Box>
     )
 
     return (
       <Box flexDirection="column" paddingX={PAD_X} paddingY={1}>
         {header}
-        {a.status === 'idle' ? (
+        {!host ? (
+          <Text color={ACCENT}>{SETUP}</Text>
+        ) : a.status === 'idle' ? (
           <Text dimColor>Run /sourcegraph-deep-search &lt;question&gt; to ask Sourcegraph Deep Search.</Text>
         ) : (
           <Box flexDirection="column">

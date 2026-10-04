@@ -7,7 +7,7 @@ Video: [Sourcegraph Deep Search in Claude Code](https://x.com/jdorfman/status/21
 ## Prerequisites
 
 - Claude Code with mods (function-hook plugins) available.
-- A Sourcegraph instance with Deep Search enabled. The mod points at `https://demo.sourcegraph.com/.api/mcp/deepsearch`. For another instance, change `url` under `mcpServers` in `.claude-plugin/plugin.json`.
+- Your Sourcegraph instance with Deep Search enabled. The mod has no default instance: you set its URL once, and the mod connects to `<your URL>/.api/mcp/deepsearch`.
 
 ## Quickstart
 
@@ -15,6 +15,8 @@ Video: [Sourcegraph Deep Search in Claude Code](https://x.com/jdorfman/status/21
 git clone https://github.com/sourcegraph-community/cookbook.git
 claude --plugin-dir cookbook/sourcegraph-deep-search
 ```
+
+When the plugin is enabled, Claude Code asks for **Sourcegraph URL**, e.g. `https://sourcegraph.example.com` (no trailing slash). To set or change it later, open `/config`, find the `sourcegraph-deep-search` row, then run `/reload-plugins`.
 
 In the session, run `/mcp` and sign in to the `plugin:sourcegraph-deep-search:deepsearch` server (OAuth). Then:
 
@@ -34,8 +36,10 @@ To load it in every session, copy the directory to `~/.claude/mods/sourcegraph-d
 
 | File | Purpose |
 | --- | --- |
-| `.claude-plugin/plugin.json` | Manifest, including the Deep Search MCP server |
+| `.claude-plugin/plugin.json` | Manifest: the Sourcegraph URL setting and the Deep Search MCP server built from it |
 | `hooks/register.tsx` | The mod: command and pane |
+| `hooks/spinner.tsx` | Animated spinner drawn while Deep Search works |
+| `assets/` | Deep Search logo (PNG for the terminal, SVG elsewhere) |
 | `types/index.d.ts` | Shape of the answer state the pane reads |
 | `tests/sourcegraph-deep-search.test.ts` | Tests against a fake MCP server |
 

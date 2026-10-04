@@ -20,9 +20,11 @@ const ANSWER = JSON.stringify({
     `Link: ${URL}`,
 })
 
+const CONFIGURED = { options: { sourcegraph_url: 'https://demo.sourcegraph.com' } } as const
+
 const connected = { value: { isConnected: true, server: 'plugin:sourcegraph-deep-search:deepsearch' } } as const
 
-test('/sourcegraph-deep-search asks Deep Search and shows the answer in the pane', async ($, on) => {
+test('/sourcegraph-deep-search asks Deep Search and shows the answer in the pane', CONFIGURED, async ($, on) => {
   const calls: { server: string; tool: string; args: Record<string, unknown> }[] = []
   on('mcp.connect', async () => connected)
   on('mcp.call', async (_$, e) => {
@@ -36,6 +38,7 @@ test('/sourcegraph-deep-search asks Deep Search and shows the answer in the pane
   expect(String(ran.text)).toContain(URL)
 
   const ui = await $.ui.mount({ ...PANE, props: PANE_PROPS, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'demo.sourcegraph.com' })).toBeDefined()
   expect(await ui.find({ type: 'Markdown', text: /^In the kubernetes\/kubernetes repo, 7 files/ })).toBeDefined()
   expect(await ui.find({ type: 'Markdown', text: /\]\(https:/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: 'kubernetes/kubernetes' })).toBeDefined()
@@ -48,7 +51,7 @@ test('/sourcegraph-deep-search asks Deep Search and shows the answer in the pane
   await ui.unmount()
 })
 
-test('an unauthenticated server tells you to sign in', async ($, on) => {
+test('an unauthenticated server tells you to sign in', CONFIGURED, async ($, on) => {
   let called = 0
   on('mcp.connect', async () => ({ value: { isConnected: false, reason: 'auth', message: 'deepsearch needs sign-in.' } }))
   on('mcp.call', async () => {
@@ -62,7 +65,7 @@ test('an unauthenticated server tells you to sign in', async ($, on) => {
   expect(called).toBe(0)
 })
 
-test('a tool error surfaces as an error', async ($, on) => {
+test('a tool error surfaces as an error', CONFIGURED, async ($, on) => {
   on('mcp.connect', async () => connected)
   on('mcp.call', async () => ({ value: { content: [{ type: 'text', text: 'Deep Search is not enabled' }], isError: true } }))
   on('ui.open', async () => ({ value: { isPlaced: true } }))
@@ -71,8 +74,23 @@ test('a tool error surfaces as an error', async ($, on) => {
   expect(String(ran.text)).toMatch(/Deep Search is not enabled/)
 })
 
-test('no question prints usage', async ($, on) => {
+test('no question prints usage', CONFIGURED, async ($, on) => {
   on('ui.open', async () => ({ value: { isPlaced: true } }))
   const ran = await $.command.run({ command: 'sourcegraph-deep-search', args: '  ' } as CommandRunInput)
   expect(String(ran.text)).toMatch(/^Usage: \/sourcegraph-deep-search <question>/)
+})
+
+test('no Sourcegraph URL asks you to set one', async ($, on) => {
+  let connects = 0
+  on('mcp.connect', async () => {
+    connects++
+    return connected
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true } }))
+  const ran = await $.command.run({ command: 'sourcegraph-deep-search', args: 'anything' } as CommandRunInput)
+  expect(String(ran.text)).toMatch(/^Set your Sourcegraph URL first/)
+  expect(connects).toBe(0)
+  const ui = await $.ui.mount({ ...PANE, props: PANE_PROPS, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Set your Sourcegraph URL first/ })).toBeDefined()
+  await ui.unmount()
 })
