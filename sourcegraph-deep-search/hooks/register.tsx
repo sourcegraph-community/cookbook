@@ -7,6 +7,12 @@ const PANE = 'sourcegraph-deep-search'
 const TITLE = 'Sourcegraph Deep Search'
 const SERVER = 'deepsearch'
 const MAX_MARKDOWN = 10_000
+const PAD_X = 2
+const RULE = '─'.repeat(240)
+const LOGO_PNG = 'assets/deep-search.png'
+const LOGO_SVG = 'assets/deep-search.svg'
+const ACCENT = '#F34E3F'
+const WORKING = 'Deep Search is researching… this can take a minute or two.'
 
 const current = atom({ plugin: 'sourcegraph-deep-search', key: 'current' } as const, {
   status: 'idle',
@@ -41,28 +47,85 @@ export function linkify(markdown: string) {
 }
 
 const SEPARATOR = /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?$/
+const MD_LINK = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g
+const ONE_LINK = /^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/
+const FILE_HEADER = /file|path|location/i
+const NOTES_HEADER = /note|detail|desc|why|reason|summary|explanation|comment/i
+const EMPTY_CELL = /^(—|–|-|n\/a)?$/i
 
 function cells(row: string) {
   return row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim())
 }
 
-export function tablesToLists(markdown: string) {
+export function elide(path: string, max = 48) {
+  const parts = path.split('/')
+  return path.length <= max || parts.length <= 3 ? path : `${parts[0]}/…/${parts.slice(-2).join('/')}`
+}
+
+export function lineRange(url: string) {
+  const m = url.match(/[?&]L(\d+)(?:-L(\d+))?/)
+  return m ? `:${m[1]}${m[2] ? `-${m[2]}` : ''}` : ''
+}
+
+export function linkLabel(label: string, url: string) {
+  return url.includes('/-/blob/') ? `${elide(label)}${lineRange(url)}` : label.replace(/^github\.com\//, '')
+}
+
+export function unlink(markdown: string) {
+  return markdown.replace(MD_LINK, (_, label: string, url: string) => linkLabel(label, url))
+}
+
+const plain = (cell: string) => unlink(cell).replace(/\*\*|`/g, '').trim()
+
+export type Card = { title: string; file?: { label: string; href?: string }; meta: string[]; notes?: string }
+export type Block = { kind: 'markdown'; text: string } | { kind: 'cards'; cards: Card[] }
+
+function toCard(header: string[], row: string[]): Card {
+  const fileCol = header.findIndex((h, i) => i > 0 && FILE_HEADER.test(h))
+  const blobCol = row.findIndex((c, i) => i > 0 && c.includes('/-/blob/'))
+  const file = fileCol > 0 ? fileCol : blobCol
+  const named = header.findIndex((h, i) => i > 0 && i !== file && NOTES_HEADER.test(h))
+  const notes = named > 0 ? named : row.length - 1 > 0 && row.length - 1 !== file ? row.length - 1 : -1
+  const card: Card = { title: plain(row[0] ?? ''), meta: [] }
+  row.forEach((cell, i) => {
+    if (i === 0 || EMPTY_CELL.test(cell)) return
+    if (i === file) {
+      const one = cell.match(ONE_LINK)
+      card.file = one ? { label: linkLabel(one[1] ?? '', one[2] ?? ''), href: one[2] } : { label: unlink(cell) }
+    } else if (i === notes) card.notes = unlink(cell)
+    else card.meta.push(`${plain(header[i] ?? '')}: ${plain(cell)}`)
+  })
+  return card
+}
+
+export function toBlocks(markdown: string): Block[] {
   const lines = markdown.split('\n')
-  const out: string[] = []
+  const blocks: Block[] = []
+  let text: string[] = []
+  const flush = () => {
+    const t = unlink(text.join('\n')).trim()
+    if (t) blocks.push({ kind: 'markdown', text: t })
+    text = []
+  }
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? ''
     if (!line.trim().startsWith('|') || !SEPARATOR.test((lines[i + 1] ?? '').trim())) {
-      out.push(line)
+      text.push(line)
       continue
     }
+    flush()
+    const header = cells(line)
+    const cards: Card[] = []
     i++
     while (i + 1 < lines.length && (lines[i + 1] ?? '').trim().startsWith('|')) {
       i++
-      const row = cells(lines[i] ?? '').filter(Boolean)
-      if (row.length) out.push(`- ${row.join(' · ')}`)
+      const row = cells(lines[i] ?? '')
+      if (row.some(Boolean)) cards.push(toCard(header, row))
     }
+    if (cards.length) blocks.push({ kind: 'cards', cards })
   }
-  return out.join('\n')
+  flush()
+  return blocks
 }
 
 export function dropUrlLine(markdown: string, url: string | undefined) {
@@ -86,6 +149,44 @@ export function clip(markdown: string) {
   return markdown.length <= MAX_MARKDOWN ? markdown : `${markdown.slice(0, MAX_MARKDOWN - 40).trimEnd()}\n\n…(truncated)`
 }
 
+export function instanceHost(manifest: string) {
+  try {
+    const url = (JSON.parse(manifest) as { mcpServers?: Record<string, { url?: string }> }).mcpServers?.[SERVER]?.url
+    return url ? new URL(url).host : undefined
+  } catch {
+    return undefined
+  }
+}
+
+type Branding = { host?: string; png?: string; svg?: string }
+let branding: Promise<Branding> | undefined
+
+function loadBranding($: EngineInterface): Promise<Branding> {
+  const root = $.plugin.root
+  const quiet = <T,>(p: Promise<T>) => p.catch(() => undefined)
+  branding ??= Promise.all([
+    quiet($.fs.read(`${root}/.claude-plugin/plugin.json`)),
+    quiet($.fs.read(`${root}/${LOGO_PNG}`, { as: 'bytes' })),
+    quiet($.fs.read(`${root}/${LOGO_SVG}`)),
+  ]).then(([manifest, png, svg]) => ({
+    host: manifest ? instanceHost(manifest) : undefined,
+    png: png?.base64,
+    svg,
+  }))
+  return branding
+}
+
+export function stamp(ms: number) {
+  return new Date(ms).toLocaleString('en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  })
+}
+
 type Outcome = { ok: true; answer: Answer } | { ok: false; error: string }
 
 async function deepSearch($: EngineInterface, question: string, seq: number): Promise<Outcome> {
@@ -107,7 +208,7 @@ async function deepSearch($: EngineInterface, question: string, seq: number): Pr
   const url = conversationUrl(markdown, fields)
   return {
     ok: true,
-    answer: { status: 'done', question, markdown: tablesToLists(linkify(dropUrlLine(markdown, url))), url, elapsedMs: Date.now() - started, seq },
+    answer: { status: 'done', question, markdown: linkify(dropUrlLine(markdown, url)), url, elapsedMs: Date.now() - started, answeredAt: Date.now(), seq },
   }
 }
 
@@ -150,22 +251,88 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Link, Markdown } = $.ui.resolve(e)
-    const a = await read($, current)
+    const ui = $.ui.resolve(e)
+    const { Box, Text, Link, Markdown } = ui
+    const [a, brand] = await Promise.all([read($, current), loadBranding($)])
 
-    if (a.status === 'idle') return <Text dimColor>Run /sourcegraph-deep-search &lt;question&gt; to ask Sourcegraph Deep Search.</Text>
+    const logo =
+      'Image' in ui && brand.png ? (
+        <ui.Image source={{ png: brand.png }} columns={2} rows={1} alt="✳" />
+      ) : 'Svg' in ui && brand.svg ? (
+        <ui.Svg source={brand.svg} width={20} height={20} alt="" />
+      ) : null
+
+    const header = (
+      <Box justifyContent="space-between" marginBottom={1}>
+        <Box gap={1}>
+          {logo}
+          <Text bold>Deep Search</Text>
+        </Box>
+        {brand.host && <Text dimColor>{brand.host}</Text>}
+      </Box>
+    )
 
     return (
-      <Box flexDirection="column">
-        <Text bold>{a.question}</Text>
-        {a.status === 'working' && <Text dimColor>Deep Search is researching… this can take a minute or two.</Text>}
-        {a.status === 'error' && <Text color="red">{a.error}</Text>}
-        {a.status === 'done' && (
-          <Box flexDirection="column" marginTop={1}>
-            <Markdown text={clip(a.markdown)} />
-            {a.url && (
+      <Box flexDirection="column" paddingX={PAD_X} paddingY={1}>
+        {header}
+        {a.status === 'idle' ? (
+          <Text dimColor>Run /sourcegraph-deep-search &lt;question&gt; to ask Sourcegraph Deep Search.</Text>
+        ) : (
+          <Box flexDirection="column">
+            <Text bold>{a.question}</Text>
+            {a.status === 'working' && (
               <Box marginTop={1}>
-                <Link href={a.url} label="Open in Sourcegraph" />
+                {'Client' in ui ? (
+                  <ui.Client key="spinner" module="./spinner.tsx" props={{ label: WORKING, color: ACCENT }} />
+                ) : (
+                  <Text dimColor>
+                    <Text color={ACCENT}>✳</Text> {WORKING}
+                  </Text>
+                )}
+              </Box>
+            )}
+            {a.status === 'error' && (
+              <Box marginTop={1}>
+                <Text color="red">{a.error}</Text>
+              </Box>
+            )}
+            {a.status === 'done' && (
+              <Box flexDirection="column" marginTop={1}>
+                <Box flexDirection="column" gap={1}>
+                  {toBlocks(clip(a.markdown)).map(b =>
+                    b.kind === 'markdown' ? (
+                      <Markdown text={b.text} />
+                    ) : (
+                      <Box flexDirection="column" gap={1}>
+                        {b.cards.map(c => (
+                          <Box flexDirection="column">
+                            <Text bold color={ACCENT}>
+                              {c.title}
+                            </Text>
+                            <Box flexDirection="column" paddingLeft={2}>
+                              {c.file && (c.file.href ? <Link href={c.file.href} label={c.file.label} /> : <Markdown text={c.file.label} />)}
+                              {c.meta.length > 0 && <Text dimColor>{c.meta.join(' · ')}</Text>}
+                              {c.notes && <Markdown text={c.notes} />}
+                            </Box>
+                          </Box>
+                        ))}
+                      </Box>
+                    ),
+                  )}
+                </Box>
+                <Box marginTop={1} height={1} overflow="hidden">
+                  <Text dimColor>{RULE}</Text>
+                </Box>
+                {a.url && (
+                  <Text>
+                    Open in Sourcegraph: <Link href={a.url} />
+                  </Text>
+                )}
+                {a.answeredAt && (
+                  <Box marginTop={1}>
+                    <Text dimColor>{stamp(a.answeredAt)}</Text>
+                  </Box>
+                )}
               </Box>
             )}
           </Box>

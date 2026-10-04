@@ -15,8 +15,8 @@ const URL = 'https://demo.sourcegraph.com/deepsearch/abc123'
 const ANSWER = JSON.stringify({
   text:
     'In the kubernetes/kubernetes (https://demo.sourcegraph.com/r/github.com/kubernetes/kubernetes) repo, 7 files still import io/ioutil:\n\n' +
-    '| File | Notes |\n|---|---|\n' +
-    '| staging/helpers_test.go (https://demo.sourcegraph.com/r/github.com/kubernetes/kubernetes/-/blob/staging/helpers_test.go?L20) | test file |\n\n' +
+    '| Repo | File | Status | Notes |\n|---|---|---|---|\n' +
+    '| [github.com/kubernetes/kubernetes](https://demo.sourcegraph.com/r/github.com/kubernetes/kubernetes) | [staging/src/k8s.io/kubectl/pkg/cmd/helpers_test.go](https://demo.sourcegraph.com/r/github.com/kubernetes/kubernetes/-/blob/staging/src/k8s.io/kubectl/pkg/cmd/helpers_test.go?L20-L24) | still imports | test file |\n\n' +
     `Link: ${URL}`,
 })
 
@@ -36,13 +36,15 @@ test('/sourcegraph-deep-search asks Deep Search and shows the answer in the pane
   expect(String(ran.text)).toContain(URL)
 
   const ui = await $.ui.mount({ ...PANE, props: PANE_PROPS, surface: 'terminal' })
-  const md = await ui.find({ type: 'Markdown', text: /\[kubernetes\/kubernetes\]\(https:\/\/demo\.sourcegraph\.com\/r\/github\.com\/kubernetes\/kubernetes\) repo/ })
-  expect(md).toBeDefined()
-  expect(await ui.find({ type: 'Markdown', text: /^- \[staging\/helpers_test\.go\]\(https:\S+\?L20\) · test file$/m })).toBeDefined()
-  expect(await ui.find({ type: 'Markdown', text: /^In the/ })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /^In the kubernetes\/kubernetes repo, 7 files/ })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /\]\(https:/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'kubernetes/kubernetes' })).toBeDefined()
+  expect(await ui.find({ type: 'Link', text: 'staging/…/cmd/helpers_test.go:20-24' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Status: still imports' })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: 'test file' })).toBeDefined()
   expect(await ui.find({ type: 'Markdown', text: /\| File \|/ })).toBeUndefined()
   expect(await ui.find({ type: 'Markdown', text: /Link:/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Link' })).toBeDefined()
+  expect(await ui.find({ type: 'Link', text: URL })).toBeDefined()
   await ui.unmount()
 })
 
