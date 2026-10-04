@@ -285,7 +285,9 @@ export const register: Register = (on, options) => {
           <Text dimColor>Run /sourcegraph-deep-search &lt;question&gt; to ask Sourcegraph Deep Search.</Text>
         ) : (
           <Box flexDirection="column">
-            <Text bold>{a.question}</Text>
+            <Box borderStyle="quote" borderDimColor paddingLeft={1}>
+              <Text dimColor>{a.question}</Text>
+            </Box>
             {a.status === 'working' && (
               <Box marginTop={1}>
                 {'Client' in ui ? (
