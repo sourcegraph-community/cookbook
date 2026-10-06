@@ -19,7 +19,7 @@ pub fn normalize(s: &str) -> String {
 /// A tracked path's basename with its extension *stripped* and normalize()
 /// applied — the value used for the §6.6 definition-vs-re-export tiebreak.
 ///
-/// Not for the §6.1 hoist: see [`basename_matches`], which has to reason about
+/// Not for the §6.1 hoist: see [`BasenameQuery::matches`], which has to reason about
 /// the extension the query may carry. Comparing this against a normalized
 /// query was the §6.1 bug — `normalize("os.rs")` keeps its dot, this drops it,
 /// so the two could never be equal.
